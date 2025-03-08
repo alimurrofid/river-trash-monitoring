@@ -37,10 +37,6 @@ nc: 1
 names: ["plastic"]
 ```
 
-## YOLO Model
-
-The `yolo_model` folder contains the YOLO models used for training.
-
 ---
 
 ## Installation & Setup
