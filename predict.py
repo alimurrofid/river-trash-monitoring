@@ -1,11 +1,27 @@
 from ultralytics import YOLO
 
-model = YOLO("runs/d2_detect/y11n_batch8_epochs10/weights/best.pt")
+model = YOLO("runs/withoutgrogol_retrain/y11n_batch16_epochs100/weights/best.pt")
 model.predict(
-    source=r"dataset2/test/images",
-    project="runs/d2_predict",
-    name="predict_y11n_batch8_epochs10",
-    show=True,
+    source=r"cobapredict",
+    # source=r"actioncam/1meter4k30fps.mp4",
+    # source=r"actioncam/1meter2k30fps.mp4",
+    # source=r"actioncam/1meter720p30fps.mp4",
+    # source=r"actioncam/1meter720p60fps.mp4",
+    # source=r"actioncam/1meter720p120fps.mp4",
+    # source=r"actioncam/1meter1080p30fps.mp4",
+    # source=r"actioncam/1meter1080p60fps.mp4",
+    # source=r"actioncam/170cm4k30fps.mp4",
+    # source=r"actioncam/170cm2k30fps.mp4",
+    # source=r"actioncam/170cm720p30fps.mp4",
+    # source=r"actioncam/170cm720p60fps.mp4",
+    # source=r"actioncam/170cm720p120fps.mp4",
+    # source=r"actioncam/170cm1080p30fps.mp4",
+    # source=r"actioncam/170cm1080p60fps.mp4",
+    project="runs/withoutgrogol_repredict",
+    name="predict_y11n_batch16_epochs100",
+    # conf=0.5,
+    # iou=0.6,
+    # device=0,
     save=True,
     save_crop=False,
     save_txt=False,

@@ -1,13 +1,62 @@
+import time
+import torch
 from ultralytics import YOLO
 
-model = YOLO("yolo11n.pt")
-model.train(
-    data="dataset2/data.yaml",
-    imgsz=640,
-    batch=8,
-    epochs=10,
-    workers=0,
-    device=0,
-    project="runs/d2_detect",
-    name="y11n_batch8_epochs10",
-)
+
+def train_model(model_path, data_yaml, project_name, run_name):
+    model = YOLO(model_path)
+
+    start_time = time.time()
+    print(
+        f"\nTraining dimulai pada: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}"
+    )
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device yang digunakan: {device}")
+
+    # Training model
+    model.train(
+        data=data_yaml,
+        batch=16,
+        epochs=100,
+        workers=2,
+        device=0,
+        project=project_name,
+        name=run_name,
+        cache=True,
+    )
+
+    end_time = time.time()
+    print(
+        f"Training selesai pada: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(end_time))}"
+    )
+    print(
+        f"Total waktu training: {int((end_time - start_time) // 3600)} jam "
+        f"{int((end_time - start_time) % 3600 // 60)} menit "
+        f"{int((end_time - start_time) % 60)} detik"
+    )
+
+
+if __name__ == "__main__":
+    # Daftar dataset dan konfigurasi
+    configs = [
+        {
+            "data_yaml": "dataset_clean_flip/data.yaml",
+            "project_name": "runs/dataset_clean_flip_retrain",
+            "run_name": "y8n_batch16_epochs100",
+        },
+        {
+            "data_yaml": "withoutgrogol/data.yaml",
+            "project_name": "runs/withoutgrogol_retrain",
+            "run_name": "y8n_batch16_epochs100",
+        },
+    ]
+
+    # Jalankan training satu per satu
+    for config in configs:
+        train_model(
+            model_path="yolov8n.pt",
+            data_yaml=config["data_yaml"],
+            project_name=config["project_name"],
+            run_name=config["run_name"],
+        )

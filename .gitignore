@@ -6,6 +6,9 @@
 
 # Dataset
 /dataset*
+/withoutgrogol*
+/video
+/actioncam
 
 # YOLO
 /runs
