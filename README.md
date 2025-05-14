@@ -4,14 +4,14 @@
 
 ### 1. Download the Dataset
 
-Download the dataset from [Roboflow](https://universe.roboflow.com/amril-syah-lubis/data-plastic).
+Download the dataset from [Dataset]().
 
 ### 2. Extract the Dataset
 
-Unpack the dataset into a folder named `dataset2`, with the following structure:
+Unpack the dataset into a folder named `dataset`, with the following structure:
 
 ```
-dataset2
+dataset
 ├── test
 │   ├── images
 │   ├── labels
@@ -29,12 +29,12 @@ dataset2
 The `data.yaml` file contains dataset configuration, including paths and class names:
 
 ```yaml
-train: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset2\train
-val: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset2\valid
-test: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset2\test
+train: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset\train
+test: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset\test
+val: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset\valid
 
-nc: 1
-names: ["plastic"]
+nc: 2
+names: ["nonplastic", "plastic"]
 ```
 
 ---
@@ -76,4 +76,11 @@ Use the following command to perform object detection:
 
 ```bash
 python predict.py
+```
+
+## Counting Objects
+Use the following command to count objects in an image:
+
+```bash
+python counting.py
 ```
