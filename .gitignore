@@ -5,10 +5,9 @@
 .vscode/
 
 # Dataset
-/dataset*
-/withoutgrogol*
-/video
-/actioncam
+/datasets
+/camera_calibrations
+/result
 
 # YOLO
 /runs
