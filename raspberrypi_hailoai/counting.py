@@ -223,7 +223,7 @@ class HailoObjectCounter:
 
 # Usage
 if __name__ == "__main__":
-    hef_model_path = "raspberrypi_hailoai/model/1865_y8.hef"
+    hef_model_path = "model/1865_y11.hef"
     video_path = "video/AE2X00017.mp4"
     
     counter = HailoObjectCounter(hef_model_path, video_path)
