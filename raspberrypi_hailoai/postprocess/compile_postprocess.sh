@@ -1,10 +1,17 @@
 #!/bin/bash
 
 set -e
-cd "$(dirname "$0")"
-mkdir -p build && cd build
+
+# pastikan environment hailo aktif
+if [ -z "$CPATH" ]; then
+  echo "ERROR: Please run 'source /home/rivermonitor/Public/hailo-rpi5-examples/setup_env.sh' first!"
+  exit 1
+fi
+
+mkdir -p build
+cd build
+
 cmake ..
 make
 
-cp libyolo_hailortpp_post.so ../../resources/
-echo "Shared object created at: ../../resources/libyolo_hailortpp_post.so"
+echo "Build finished. Shared object is at build/libriver_trash_post.so"
