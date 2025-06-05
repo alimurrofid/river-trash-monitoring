@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set the project directory name
-PROJECT_DIR="."
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Enable strict error handling
 set -e
