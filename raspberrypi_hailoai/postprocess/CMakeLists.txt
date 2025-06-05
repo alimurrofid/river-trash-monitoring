@@ -1,14 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
-project(river_trash_postprocess)
+project(river_trash_post)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Include header path dari environment variable CPATH
-include_directories($ENV{CPATH})
+# Include header dari folder post process hailo (pakai env var)
+include_directories($ENV{TAPPAS_POST_PROC_DIR})
 
-# Link path dari environment variable LD_LIBRARY_PATH
-link_directories($ENV{LD_LIBRARY_PATH})
-
-add_library(river_trash_post SHARED river_trash_post.cpp)
-
-target_link_libraries(river_trash_post hailo_tappas_core)
+add_executable(river_trash_post river_trash_post.cpp)
