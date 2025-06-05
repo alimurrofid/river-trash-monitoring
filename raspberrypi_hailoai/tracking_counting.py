@@ -7,13 +7,13 @@ import numpy as np
 import setproctitle
 import hailo
 import supervision as sv
-from hailo_rpi_common import (
+from hailo_apps_infra.hailo_rpi_common import (
     get_default_parser,
     QUEUE,
     get_caps_from_pad,
     app_callback_class,
-    GStreamerApp
 )
+from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
 
 # --- Callback untuk setiap frame pipeline ---
 def app_callback(pad, info, user_data):
