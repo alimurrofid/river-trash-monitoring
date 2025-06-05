@@ -9,11 +9,10 @@ import hailo
 import supervision as sv
 from hailo_apps_infra.hailo_rpi_common import (
     get_default_parser,
-    QUEUE,
     get_caps_from_pad,
     app_callback_class,
 )
-from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
+from hailo_apps_infra.detection_pipeline import GStreamerApp
 
 # --- Callback untuk setiap frame pipeline ---
 def app_callback(pad, info, user_data):
@@ -102,7 +101,6 @@ class GStreamerDetectionApp(GStreamerApp):
         self.create_pipeline()
 
     def get_pipeline_string(self):
-        # Sesuaikan dengan device (USB kamera, file video, dll)
         if self.source_type == "usb":
             source_element = (
                 f"v4l2src device={self.video_source} name=src_0 ! "
@@ -111,21 +109,17 @@ class GStreamerDetectionApp(GStreamerApp):
         elif self.source_type == "file":
             source_element = (
                 f"filesrc location={self.video_source} name=src_0 ! "
-                + QUEUE("queue_dec264")
-                + " qtdemux ! h264parse ! avdec_h264 max-threads=2 ! "
+                "qtdemux ! h264parse ! avdec_h264 max-threads=2 ! "
                 "video/x-raw, format=I420 ! "
             )
         else:
-            # contoh untuk Raspberry Pi camera
             source_element = (
                 "libcamerasrc name=src_0 auto-focus-mode=2 ! "
-                f"video/x-raw, format={self.network_format}, width=1536, height=864  ! "
-                + QUEUE("queue_src_scale")
-                + "videoscale ! "
+                f"video/x-raw, format={self.network_format}, width=1536, height=864 ! "
+                "videoscale ! "
                 f"video/x-raw, format={self.network_format}, width={self.network_width}, height={self.network_height}, framerate=60/1 ! "
             )
 
-        source_element += QUEUE("queue_src_convert")
         source_element += "videoconvert n-threads=3 name=src_convert qos=false ! "
         source_element += f"video/x-raw, format={self.network_format}, width={self.network_width}, height={self.network_height}, pixel-aspect-ratio=1/1 ! "
 
@@ -133,29 +127,18 @@ class GStreamerDetectionApp(GStreamerApp):
             "hailomuxer name=hmux "
             + source_element
             + "tee name=t ! "
-            + QUEUE("bypass_queue", max_size_buffers=20)
             + "hmux.sink_0 "
             + "t. ! "
-            + QUEUE("queue_hailonet")
             + "videoconvert n-threads=3 ! "
             + f"hailonet hef-path={self.hef_path} batch-size={self.batch_size} {self.thresholds_str} force-writable=true ! "
-            + QUEUE("queue_hailofilter")
             + f"hailofilter so-path={self.default_postprocess_so} {self.labels_config} qos=false ! "
-            + QUEUE("queue_hailotracker")
             + "hailotracker keep-tracked-frames=3 keep-new-frames=3 keep-lost-frames=3 ! "
-            + QUEUE("queue_hmuc")
             + "hmux.sink_1 "
             + "hmux. ! "
-            + QUEUE("queue_hailo_python")
-            + QUEUE("queue_user_callback")
             + "identity name=identity_callback ! "
-            + QUEUE("queue_hailooverlay")
             + "hailooverlay ! "
-            + QUEUE("queue_videoconvert")
             + "videoconvert n-threads=3 qos=false ! "
-            + QUEUE("queue_textoverlay")
             + "textoverlay name=hailo_text text='' valignment=top halignment=center ! "
-            + QUEUE("queue_hailo_display")
             + f"fpsdisplaysink video-sink={self.video_sink} name=hailo_display sync={self.sync} text-overlay={self.options_menu.show_fps} signal-fps-measurements=true "
         )
 
