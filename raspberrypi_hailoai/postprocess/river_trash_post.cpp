@@ -3,9 +3,7 @@
  * Postprocess for river trash detection: nonplastic & plastic
  */
 
-#include "hailo_objects.hpp"
-#include <vector>
-#include <string>
+#include "river_trash_post.hpp"
 
 #define NONPLASTIC_LABEL "nonplastic"
 #define PLASTIC_LABEL "plastic"
