@@ -19,4 +19,4 @@ rapidjson_inc_dir = postprocess_dep.get_variable(pkgconfig: 'rapidjson_includedi
 # rapidjson Include Directories
 rapidjson_inc = include_directories(rapidjson_inc_dir, is_system: true)
 
-subdir('cpp')
+subdir('postprocess')
