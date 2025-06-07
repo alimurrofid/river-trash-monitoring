@@ -1,51 +1,67 @@
 import cv2
 
-# Rasio konversi: 2.5 cm = 72 px
-cm_per_pixel = 8.4 / 230  # ≈ 0.03472
+# ====== KALIBRASI ======
+ukuran_objek_cm = 2.5
+ukuran_objek_px = 50
+jarak_kalibrasi_cm = 100
+k = ukuran_objek_cm / (ukuran_objek_px * jarak_kalibrasi_cm)
+jarak_kamera_cm = 110  # Ganti sesuai kondisi nyata
+cm_per_pixel = k * jarak_kamera_cm
 
-# Inisialisasi kamera (0 adalah default webcam)
+# ====== INISIALISASI KAMERA ======
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
+cap.set(cv2.CAP_PROP_FPS, 30)
 
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = cap.get(cv2.CAP_PROP_FPS)
+fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+fourcc = "".join([chr((fourcc_int >> 8 * i) & 0xFF) for i in range(4)])
+
+print(f"Resolusi: {width}x{height}")
+print(f"FPS: {fps}")
+print(f"FOURCC Codec: {fourcc}")
+print(f"Rasio cm/pixel: {cm_per_pixel:.5f} cm/pixel")
+
+# ====== RESIZE UNTUK TAMPILAN WINDOW ======
+display_width = 1280
+display_height = 720
+scale_x = display_width / width
+scale_y = display_height / height
+
+# ====== LOOP UTAMA ======
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Konversi ke grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Threshold untuk mendapatkan objek (bisa juga gunakan Canny edge atau deteksi warna)
     _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
-
-    # Temukan kontur
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     for cnt in contours:
-        # Abaikan kontur kecil
         if cv2.contourArea(cnt) < 500:
             continue
-
         x, y, w, h = cv2.boundingRect(cnt)
 
-        # Ukuran dalam cm
         width_cm = w * cm_per_pixel
         height_cm = h * cm_per_pixel
 
-        # Gambar bounding box
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        # Ubah warna ke biru (BGR: 255, 0, 0)
+        color = (255, 0, 0)
 
-        # Tampilkan ukuran objek dalam piksel & cm
+        cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
         label = f"{w}px/{width_cm:.2f}cm x {h}px/{height_cm:.2f}cm"
         cv2.putText(frame, label, (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-    # Tampilkan frame
-    cv2.imshow("Object Size Detection", frame)
+    display_frame = cv2.resize(frame, (display_width, display_height))
+    cv2.imshow("Object Size Detection", display_frame)
 
-    # Tekan 'q' untuk keluar
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# Bersihkan
 cap.release()
 cv2.destroyAllWindows()
