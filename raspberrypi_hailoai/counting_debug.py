@@ -1,0 +1,415 @@
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GLib
+import os
+import numpy as np
+import cv2
+import hailo
+import time
+import supervision as sv
+from typing import Dict, Set, Tuple, Optional, List
+
+from hailo_apps_infra.hailo_rpi_common import (
+    get_caps_from_pad,
+    get_numpy_from_buffer,
+    app_callback_class,
+)
+from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
+
+
+class HailoObjectCounterFixed(app_callback_class):
+    """Fixed version - Handle invalid Track IDs for plastic objects"""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Configuration
+        self.detection_threshold = 0.1
+        self.line_y_ratio = 0.7
+        self.line_y = None
+        
+        # Label colors
+        self.label_colors = {
+            "plastic": (0, 255, 255),      # Yellow
+            "nonplastic": (0, 0, 255),     # Red  
+            "unlabeled": (255, 255, 0)     # Cyan
+        }
+        
+        # Label mapping
+        self.class_names = {
+            0: "unlabeled",
+            1: "nonplastic", 
+            2: "plastic"
+        }
+        
+        # Object counting variables
+        self.object_counter = {}
+        self.track_history = {}
+        self.counted_objects = set()
+        
+        # FPS tracking
+        self.prev_time = 0
+        self.fps_list = []
+        
+        # Frame processing
+        self.frame_count = 0
+        
+        # Debug statistics
+        self.detection_stats = {
+            "plastic": 0,
+            "nonplastic": 0,
+            "unlabeled": 0,
+            "total_detections": 0
+        }
+        
+        # FALLBACK TRACKING SYSTEM for plastic objects without valid Track ID
+        self.next_fallback_id = 10000  # Start fallback IDs from 10000
+        self.plastic_fallback_tracker = {}  # bbox -> fallback_track_id
+        self.bbox_similarity_threshold = 50  # pixels
+        
+        # Track ID statistics
+        self.track_id_stats = {
+            "plastic_valid_ids": 0,
+            "plastic_invalid_ids": 0,
+            "nonplastic_valid_ids": 0,
+            "nonplastic_invalid_ids": 0
+        }
+        
+        print("🔧 TRACKING FIX: Implementing fallback tracking for plastic objects")
+
+    def set_line_position(self, height: int):
+        if self.line_y is None:
+            self.line_y = int(height * self.line_y_ratio)
+            print(f"🔧 Counting line set at Y: {self.line_y}")
+
+    def calculate_fps(self) -> float:
+        curr_time = time.time()
+        fps = 1 / (curr_time - self.prev_time) if self.prev_time > 0 else 0
+        self.prev_time = curr_time
+        self.fps_list.append(fps)
+        return fps
+
+    def get_label_color(self, label: str) -> Tuple[int, int, int]:
+        return self.label_colors.get(label, (255, 255, 255))
+
+    def calculate_bbox_distance(self, bbox1: Tuple, bbox2: Tuple) -> float:
+        """Calculate distance between two bounding box centers"""
+        x1_center = (bbox1[0] + bbox1[2]) / 2
+        y1_center = (bbox1[1] + bbox1[3]) / 2
+        x2_center = (bbox2[0] + bbox2[2]) / 2
+        y2_center = (bbox2[1] + bbox2[3]) / 2
+        
+        return np.sqrt((x1_center - x2_center)**2 + (y1_center - y2_center)**2)
+
+    def get_fallback_track_id(self, bbox: Tuple, class_name: str) -> int:
+        """Get or create fallback track ID for objects without valid tracking"""
+        if class_name != "plastic":
+            return 0  # Only use fallback for plastic
+        
+        # Check if we can match with existing fallback tracker
+        for tracked_bbox, track_id in self.plastic_fallback_tracker.items():
+            distance = self.calculate_bbox_distance(bbox, tracked_bbox)
+            if distance < self.bbox_similarity_threshold:
+                # Update the bbox position
+                self.plastic_fallback_tracker[bbox] = track_id
+                # Remove old bbox
+                if tracked_bbox != bbox:
+                    del self.plastic_fallback_tracker[tracked_bbox]
+                return track_id
+        
+        # Create new fallback track ID
+        new_id = self.next_fallback_id
+        self.next_fallback_id += 1
+        self.plastic_fallback_tracker[bbox] = new_id
+        print(f"🆔 Created fallback Track ID {new_id} for plastic object")
+        return new_id
+
+    def update_object_count(self, track_id: int, center_y: int, class_name: str):
+        """Update object count with enhanced logging"""
+        if track_id is not None and track_id > 0:
+            if track_id in self.track_history:
+                prev_y = self.track_history[track_id]
+                
+                # Log crossing attempts
+                if prev_y < self.line_y <= center_y and track_id not in self.counted_objects:
+                    self.object_counter[class_name] = self.object_counter.get(class_name, 0) + 1
+                    self.counted_objects.add(track_id)
+                    track_type = "FALLBACK" if track_id >= 10000 else "HAILO"
+                    print(f"🎯 {class_name} bertambah: {self.object_counter[class_name]} (ID: {track_id}) [{track_type}]")
+                
+                # Debug near-line behavior for plastic
+                elif class_name == "plastic" and abs(center_y - self.line_y) < 30:
+                    direction = "⬇️" if center_y > prev_y else "⬆️"
+                    crossing = "YES" if prev_y < self.line_y <= center_y else "NO"
+                    already_counted = "YES" if track_id in self.counted_objects else "NO"
+                    print(f"🔍 PLASTIC near line: Track {track_id}: {prev_y}→{center_y} {direction} "
+                          f"Crossing: {crossing}, Already counted: {already_counted}")
+            
+            # Update track history
+            self.track_history[track_id] = center_y
+
+    def process_hailo_detections(self, hailo_detections: List, width: int, height: int):
+        """Process detections with fallback tracking for plastic objects"""
+        n = len(hailo_detections)
+        if n == 0:
+            return None, []
+        
+        valid_detections = []
+        frame_stats = {"plastic": 0, "nonplastic": 0, "unlabeled": 0}
+        tracking_debug = {"plastic_tracked": 0, "plastic_untracked": 0, 
+                         "nonplastic_tracked": 0, "nonplastic_untracked": 0}
+        
+        for i, detection in enumerate(hailo_detections):
+            conf = detection.get_confidence()
+            cls_id = detection.get_class_id()
+            class_name = self.class_names.get(cls_id, "unknown")
+            
+            self.detection_stats["total_detections"] += 1
+            
+            if conf <= self.detection_threshold:
+                continue
+            
+            # Get bounding box
+            bbox = detection.get_bbox()
+            x1 = bbox.xmin() * width
+            y1 = bbox.ymin() * height
+            x2 = bbox.xmax() * width
+            y2 = bbox.ymax() * height
+            bbox_coords = (int(x1), int(y1), int(x2), int(y2))
+            
+            # Get original track ID from Hailo
+            original_track_id = 0
+            try:
+                track_objects = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
+                original_track_id = track_objects[0].get_id() if len(track_objects) > 0 else 0
+            except:
+                original_track_id = 0
+            
+            # Determine final track ID
+            if original_track_id > 0:
+                # Valid track ID from Hailo
+                final_track_id = original_track_id
+                if class_name == "plastic":
+                    self.track_id_stats["plastic_valid_ids"] += 1
+                    tracking_debug["plastic_tracked"] += 1
+                else:
+                    self.track_id_stats["nonplastic_valid_ids"] += 1
+                    tracking_debug["nonplastic_tracked"] += 1
+            else:
+                # Invalid track ID - use fallback for plastic
+                if class_name == "plastic":
+                    final_track_id = self.get_fallback_track_id(bbox_coords, class_name)
+                    self.track_id_stats["plastic_invalid_ids"] += 1
+                    tracking_debug["plastic_untracked"] += 1
+                else:
+                    final_track_id = 0  # Don't track non-plastic without valid ID
+                    self.track_id_stats["nonplastic_invalid_ids"] += 1
+                    tracking_debug["nonplastic_untracked"] += 1
+            
+            center_y = int((y1 + y2) / 2)
+            center_x = int((x1 + x2) / 2)
+            
+            detection_info = {
+                'bbox': bbox_coords,
+                'track_id': final_track_id,
+                'original_track_id': original_track_id,
+                'label': class_name,
+                'confidence': conf,
+                'center_y': center_y,
+                'center_x': center_x
+            }
+            valid_detections.append(detection_info)
+            
+            # Update counting
+            self.update_object_count(final_track_id, center_y, class_name)
+            
+            # Update stats
+            if class_name in frame_stats:
+                frame_stats[class_name] += 1
+                self.detection_stats[class_name] += 1
+        
+        # Debug output every 60 frames
+        if self.frame_count % 60 == 0:
+            print(f"\n🔍 TRACKING DEBUG (Frame {self.frame_count}):")
+            print(f"   Frame detections: {frame_stats}")
+            print(f"   Tracking status: {tracking_debug}")
+            print(f"   Active plastic fallback IDs: {len(self.plastic_fallback_tracker)}")
+            print(f"   Total tracked objects: {len(self.track_history)}")
+        
+        return None, valid_detections
+
+    def draw_frame_overlay(self, frame: np.ndarray, width: int, height: int, fps: float, detections: List):
+        """Enhanced visualization with tracking status"""
+        
+        # Draw counting line
+        if self.line_y is not None:
+            cv2.line(frame, (0, self.line_y), (width, self.line_y), (0, 255, 0), 4)
+            cv2.putText(frame, f"Counting Line Y:{self.line_y}", (width//2 - 120, self.line_y - 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Draw FPS
+        cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+        
+        # Draw object counts
+        y_offset = 70
+        all_classes = ["plastic", "nonplastic", "unlabeled"]
+        for i, cls in enumerate(all_classes):
+            count = self.object_counter.get(cls, 0)
+            text = f"{cls}: {count}"
+            color = self.get_label_color(cls)
+            cv2.putText(frame, text, (10, y_offset + (i * 30)),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        
+        # Draw detection statistics
+        stats_y = y_offset + len(all_classes) * 30 + 20
+        cv2.putText(frame, "Detection Stats:", (10, stats_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        for i, (cls, count) in enumerate(self.detection_stats.items()):
+            if cls != "total_detections":
+                text = f"{cls}: {count}"
+                color = self.get_label_color(cls) if cls in self.label_colors else (255, 255, 255)
+                cv2.putText(frame, text, (10, stats_y + 20 + (i * 20)),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        
+        # Draw tracking statistics
+        track_stats_y = stats_y + 100
+        cv2.putText(frame, "Tracking Stats:", (10, track_stats_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        plastic_tracked = len([d for d in detections if d['label'] == 'plastic' and d['track_id'] > 0])
+        cv2.putText(frame, f"Plastic tracked: {plastic_tracked}", (10, track_stats_y + 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        
+        fallback_count = len([d for d in detections if d['label'] == 'plastic' and d['track_id'] >= 10000])
+        cv2.putText(frame, f"Fallback IDs: {fallback_count}", (10, track_stats_y + 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+        
+        # Draw bounding boxes
+        for det in detections:
+            x1, y1, x2, y2 = det['bbox']
+            track_id = det['track_id']
+            original_id = det['original_track_id']
+            label = det['label']
+            confidence = det['confidence']
+            center_y = det['center_y']
+            center_x = det['center_x']
+            
+            color = self.get_label_color(label)
+            
+            # Different visualization based on tracking status
+            if track_id >= 10000:  # Fallback tracking
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                cv2.putText(frame, "FALLBACK", (x1, y1 - 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
+            elif track_id > 0:  # Valid Hailo tracking
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            else:  # No tracking
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (128, 128, 128), 2)
+                cv2.putText(frame, "NO TRACK", (x1, y1 - 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (128, 128, 128), 1)
+            
+            # Draw center point
+            cv2.circle(frame, (center_x, center_y), 3, color, -1)
+            
+            # Enhanced label with tracking info
+            if track_id >= 10000:
+                label_text = f"{label} (F{track_id-10000}) {confidence*100:.1f}%"
+            elif track_id > 0:
+                label_text = f"{label} ({track_id}) {confidence*100:.1f}%"
+            else:
+                label_text = f"{label} (X) {confidence*100:.1f}%"
+            
+            cv2.putText(frame, label_text, (x1, y1 - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            
+            # Show Y position for tracked objects
+            if track_id > 0:
+                cv2.putText(frame, f"Y:{center_y}", (x1, y2 + 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+    def print_final_statistics(self):
+        """Print comprehensive statistics including tracking analysis"""
+        print("\n" + "="*60)
+        print("FINAL HAILO TRACKING FIX RESULTS")
+        print("="*60)
+        print("📊 Counted Objects:", self.object_counter)
+        print("\n🔍 Detection Statistics:")
+        for cls, count in self.detection_stats.items():
+            print(f"    {cls}: {count}")
+        
+        print("\n🆔 Track ID Statistics:")
+        print(f"    Plastic - Valid IDs: {self.track_id_stats['plastic_valid_ids']}")
+        print(f"    Plastic - Invalid IDs (fixed): {self.track_id_stats['plastic_invalid_ids']}")
+        print(f"    NonPlastic - Valid IDs: {self.track_id_stats['nonplastic_valid_ids']}")
+        print(f"    NonPlastic - Invalid IDs: {self.track_id_stats['nonplastic_invalid_ids']}")
+        
+        print(f"\n📈 Total frames: {self.frame_count}")
+        print(f"🎯 Objects that crossed line: {len(self.counted_objects)}")
+        print(f"👁️ Total tracked objects: {len(self.track_history)}")
+        print(f"🔧 Fallback trackers created: {self.next_fallback_id - 10000}")
+        print("="*60)
+
+
+def app_callback(pad, info, user_data: HailoObjectCounterFixed):
+    """Main callback with tracking fix"""
+    buffer = info.get_buffer()
+    if buffer is None:
+        return Gst.PadProbeReturn.OK
+    
+    user_data.increment()
+    user_data.frame_count += 1
+    
+    format, width, height = get_caps_from_pad(pad)
+    
+    if height is not None:
+        user_data.set_line_position(height)
+    
+    current_fps = user_data.calculate_fps()
+    
+    frame = None
+    if user_data.use_frame and all([format, width, height]):
+        frame = get_numpy_from_buffer(buffer, format, width, height)
+    
+    roi = hailo.get_roi_from_buffer(buffer)
+    hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+    
+    sv_detections, detection_list = user_data.process_hailo_detections(
+        hailo_detections, width, height
+    )
+    
+    if user_data.use_frame and frame is not None:
+        user_data.draw_frame_overlay(frame, width, height, current_fps, detection_list)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        user_data.set_frame(frame)
+    
+    return Gst.PadProbeReturn.OK
+
+
+def main():
+    try:
+        user_data = HailoObjectCounterFixed()
+        user_data.use_frame = True
+        
+        app = GStreamerDetectionApp(app_callback, user_data)
+        
+        print("🔧 Starting TRACKING FIX VERSION")
+        print("🎯 Implementing fallback tracking for plastic objects")
+        print("⏹️  Press Ctrl+C to stop")
+        
+        app.run()
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Application stopped")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if 'user_data' in locals():
+            user_data.print_final_statistics()
+
+
+if __name__ == "__main__":
+    main()
