@@ -3,10 +3,10 @@ import time
 from ultralytics import YOLO
 
 # Load model YOLO
-model = YOLO("runs/dataset_clean_flip_retrain/y11n_batch16_epochs100/weights/best.hef")
+model = YOLO("runs/dataset_clean_flip_retrain/y11n_batch16_epochs100/weights/best.pt")
 
 # Buka video input
-cap = cv2.VideoCapture("actioncam/AE2X00017.mp4")
+cap = cv2.VideoCapture("datasets/actioncam/AE2X00017.mp4")
 cv2.namedWindow("Object Counting", cv2.WINDOW_NORMAL)
 
 # Ukuran asli frame
