@@ -12,6 +12,11 @@ cd raspberrypi_hailoai
 ```
 
 ### Installation
+Set permissions for the installation script:
+```bash
+chmod +x ./install.sh
+```
+
 Run the following script to automate the installation process:
 ```bash
 ./install.sh
