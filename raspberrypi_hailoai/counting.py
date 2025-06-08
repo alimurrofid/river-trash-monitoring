@@ -186,8 +186,6 @@ class HailoObjectCounterFixed(app_callback_class):
         # Draw counting line
         if self.line_y is not None:
             cv2.line(frame, (0, self.line_y), (width, self.line_y), (0, 255, 0), 4)
-            cv2.putText(frame, f"Counting Line Y:{self.line_y}", (width//2 - 120, self.line_y - 15),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         # Draw FPS
         cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
@@ -195,7 +193,7 @@ class HailoObjectCounterFixed(app_callback_class):
 
         # Draw object counts
         y_offset = 70
-        all_classes = ["plastic", "nonplastic", "unlabeled"]
+        all_classes = ["plastic", "nonplastic"]
         for i, cls in enumerate(all_classes):
             count = self.object_counter.get(cls, 0)
             text = f"{cls}: {count}"

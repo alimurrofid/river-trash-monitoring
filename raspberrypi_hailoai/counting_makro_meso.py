@@ -51,7 +51,6 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.label_colors = {
             "plastic": (0, 255, 255),      # Yellow
             "nonplastic": (0, 0, 255),     # Red
-            "unlabeled": (255, 255, 0)     # Cyan
         }
 
         # Size category colors
@@ -99,7 +98,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
     def _initialize_counters(self):
         """Initialize counter structure for all classes"""
-        for class_name in ["plastic", "nonplastic", "unlabeled"]:
+        for class_name in ["plastic", "nonplastic"]:
             if class_name not in self.object_counter:
                 self.object_counter[class_name] = {
                     "total": 0,
@@ -380,8 +379,6 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         # Draw counting line
         if self.line_y is not None:
             cv2.line(frame, (0, self.line_y), (width, self.line_y), (0, 255, 0), 4)
-            cv2.putText(frame, f"Counting Line Y:{self.line_y}", (width//2 - 120, self.line_y - 15),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         # Draw FPS, resolution, and distance info
         cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
@@ -402,7 +399,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
         y_offset += 30
-        for i, cls in enumerate(["plastic", "nonplastic", "unlabeled"]):
+        for i, cls in enumerate(["plastic", "nonplastic"]):
             counts = self.object_counter.get(cls, {"total": 0, "makro": 0, "meso": 0})
             text = f"{cls}: Total={counts['total']} | Makro={counts['makro']} | Meso={counts['meso']}"
             color = self.get_label_color(cls)
