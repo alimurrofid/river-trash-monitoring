@@ -2,11 +2,10 @@ import cv2
 import time
 from ultralytics import YOLO
 import sys
-import os
 
 # ====== KALIBRASI UKURAN DENGAN JARAK ======
-ukuran_objek_cm = 2.5           # Ukuran real objek kalibrasi (cm)
-ukuran_objek_px = 62            # Ukuran objek di kamera saat kalibrasi (pixel)
+ukuran_objek_cm = 4.1           # Ukuran real objek kalibrasi (cm)
+ukuran_objek_px = 69            # Ukuran objek di kamera saat kalibrasi (pixel)
 jarak_kalibrasi_cm = 80         # Jarak kamera ke objek saat kalibrasi (cm)
 jarak_kerja_cm = 80             # Jarak kamera saat penggunaan (cm) - bisa diubah
 
@@ -14,12 +13,6 @@ jarak_kerja_cm = 80             # Jarak kamera saat penggunaan (cm) - bisa diuba
 k = ukuran_objek_cm / (ukuran_objek_px * jarak_kalibrasi_cm)
 cm_per_pixel = k * jarak_kerja_cm
 
-# ====== VIDEO PATH ======
-video_path = "datasets/actioncam/AE2X00017.mp4"
-
-print(f"=== VIDEO OBJECT COUNTING ===")
-print(f"Video path: {video_path}")
-print()
 print(f"=== KALIBRASI JARAK ===")
 print(f"Ukuran objek kalibrasi: {ukuran_objek_cm} cm")
 print(f"Ukuran di kamera (kalibrasi): {ukuran_objek_px} pixel")
@@ -28,6 +21,63 @@ print(f"Jarak kerja saat ini: {jarak_kerja_cm} cm")
 print(f"Konstanta k: {k:.8f}")
 print(f"cm_per_pixel saat ini: {cm_per_pixel:.5f}")
 print()
+
+def find_working_camera():
+    """Find a working camera"""
+    print("🔍 Mencari kamera yang tersedia...")
+    
+    for i in range(5):  # Test camera 0-4
+        print(f"Testing camera {i}...", end=" ")
+        cap = cv2.VideoCapture(i)
+        
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                print(f"✅ Found working camera!")
+                cap.release()
+                return i
+            else:
+                print("❌ Can't read")
+        else:
+            print("❌ Can't open")
+        
+        cap.release()
+    
+    return None
+
+def setup_camera(camera_id):
+    """Setup camera with error handling"""
+    print(f"📹 Setting up camera {camera_id}...")
+    
+    cap = cv2.VideoCapture(camera_id)
+    
+    if not cap.isOpened():
+        print("❌ Failed to open camera!")
+        return None
+    
+    # Try to set high resolution first
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    
+    # Get actual resolution
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    print(f"✅ Camera setup successful!")
+    print(f"Resolution: {width}x{height}")
+    print(f"FPS: {fps}")
+    
+    # Test frame reading
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        print("❌ Cannot read frames from camera!")
+        cap.release()
+        return None
+    
+    print(f"✅ Frame reading test successful!")
+    return cap
 
 def update_distance_calibration(new_distance_cm):
     """Update cm_per_pixel berdasarkan jarak baru"""
@@ -92,37 +142,32 @@ def get_accurate_measurement(frame, yolo_bbox):
     
     return x1, y1, x2, y2, x2-x1, y2-y1
 
-# ====== CHECK VIDEO FILE ======
-print("🎥 Checking video file...")
-if not os.path.exists(video_path):
-    print(f"❌ Video file not found: {video_path}")
-    print("Please check the path and make sure the file exists.")
+# ====== MAIN PROGRAM START ======
+print("🚀 Starting Object Counting Program...")
+
+# Find and setup camera
+camera_id = find_working_camera()
+if camera_id is None:
+    print("❌ No working camera found!")
+    print("\nPossible solutions:")
+    print("1. Check camera connection")
+    print("2. Close other apps using camera")
+    print("3. Check camera permissions")
+    print("4. Try different USB port")
     sys.exit()
 
-# ====== SETUP VIDEO CAPTURE ======
-print("📹 Setting up video capture...")
-cap = cv2.VideoCapture(video_path)
-
-if not cap.isOpened():
-    print(f"❌ Failed to open video: {video_path}")
+cap = setup_camera(camera_id)
+if cap is None:
+    print("❌ Camera setup failed!")
     sys.exit()
 
-# Get video properties
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-fps_input = cap.get(cv2.CAP_PROP_FPS)
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-duration_seconds = total_frames / fps_input if fps_input > 0 else 0
 
-print(f"✅ Video loaded successfully!")
-print(f"Resolution: {frame_width}x{frame_height}")
-print(f"FPS: {fps_input}")
-print(f"Total frames: {total_frames}")
-print(f"Duration: {duration_seconds:.2f} seconds")
-
-# Setup display
+# Resize tampilan
 display_width = min(1280, frame_width)
 display_height = min(720, frame_height)
+
 print(f"Display size: {display_width}x{display_height}")
 
 # ====== LOAD MODEL ======
@@ -143,7 +188,6 @@ COLOR_FPS = (0, 255, 255)
 COLOR_LINE = (0, 0, 255)      # MERAH untuk garis counting
 COLOR_TEXT = (255, 0, 0)
 COLOR_DISTANCE = (255, 255, 0) # Cyan
-COLOR_PROGRESS = (255, 255, 255) # White
 
 # ====== TRACKING & COUNTING ======
 line_y = int(frame_height * 0.6)
@@ -151,11 +195,11 @@ object_counter = {}
 track_history = {}
 counted_objects = set()
 
-# Video processing info
-frame_count = 0
-process_fps = 0
-prev_time = time.time()
+# FPS info
+prev_time = 0
+fps_list = []
 batch_interval = 2
+frame_count = 0
 last_results = None
 
 # Debug info
@@ -163,57 +207,38 @@ show_debug = True
 measurement_log = []
 distance_calibration_mode = False
 
-# Video controls
-paused = False
-skip_frames = 1  # Process every N frames for speed
-
 print("✅ Program ready!")
 print("\nControls:")
-print("- SPACE: Pause/Resume")
 print("- 'd': Toggle debug info")
 print("- 'r': Reset counter")
 print("- 'c': Distance calibration mode")
 print("- '+': Increase distance (closer)")
 print("- '-': Decrease distance (farther)")
-print("- 's': Toggle skip frames (1x/2x/4x speed)")
 print("- 'q': Quit")
-print("- LEFT/RIGHT: Seek backward/forward (when paused)")
+print("\nPress any key in the camera window to start...")
 
 # Create window
-cv2.namedWindow("Video Object Counting", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("Video Object Counting", display_width, display_height)
+cv2.namedWindow("Distance-Calibrated Object Counting", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Distance-Calibrated Object Counting", display_width, display_height)
 
 # ====== MAIN LOOP ======
 try:
-    while True:
-        if not paused:
-            # Skip frames for speed
-            for _ in range(skip_frames):
-                ret, frame = cap.read()
-                if not ret:
-                    print("📹 End of video reached")
-                    break
-                frame_count += 1
-            
-            if not ret:
-                break
-        else:
-            # When paused, just use last frame
-            if 'frame' not in locals():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frame_count += 1
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            print("❌ Failed to read frame!")
+            break
 
-        # Calculate processing FPS
+        frame_count += 1
         curr_time = time.time()
-        process_fps = 1 / (curr_time - prev_time) if prev_time > 0 else 0
+        fps = 1 / (curr_time - prev_time) if prev_time > 0 else 0
         prev_time = curr_time
+        fps_list.append(fps)
 
         input_frame = frame.copy()
 
         # Run YOLO detection with batch processing
-        if not paused and (frame_count % batch_interval == 0):
+        if frame_count % batch_interval == 0:
             try:
                 results = model.track(input_frame, persist=True)
                 last_results = results
@@ -222,10 +247,6 @@ try:
                 results = last_results
         else:
             results = last_results
-
-        # Calculate progress
-        progress = (frame_count / total_frames) * 100 if total_frames > 0 else 0
-        current_time = frame_count / fps_input if fps_input > 0 else 0
 
         # Draw counting line
         cv2.line(frame, (0, line_y), (frame_width, line_y), COLOR_LINE, 3)
@@ -264,26 +285,25 @@ try:
                         kategori = "lain"
                         color = (128, 128, 128)  # Gray
 
-                    # Tracking (only when not paused)
-                    if not paused:
-                        center_y = int((acc_y1 + acc_y2) / 2)
+                    # Tracking
+                    center_y = int((acc_y1 + acc_y2) / 2)
 
-                        if track_id is not None:
-                            if track_id in track_history:
-                                prev_y = track_history[track_id]
-                                if prev_y < line_y <= center_y and track_id not in counted_objects:
-                                    counted_objects.add(track_id)
-                                    if class_name not in object_counter:
-                                        object_counter[class_name] = {"total": 0, "meso": 0, "makro": 0}
-                                    object_counter[class_name]["total"] += 1
-                                    if kategori in ["meso", "makro"]:
-                                        object_counter[class_name][kategori] += 1
-                                    
-                                    log_entry = f"{class_name} ({kategori}): {width_cm:.1f}x{height_cm:.1f}cm at {current_time:.1f}s"
-                                    measurement_log.append(log_entry)
-                                    print(f"COUNTED: {log_entry}")
-                                    
-                            track_history[track_id] = center_y
+                    if track_id is not None:
+                        if track_id in track_history:
+                            prev_y = track_history[track_id]
+                            if prev_y < line_y <= center_y and track_id not in counted_objects:
+                                counted_objects.add(track_id)
+                                if class_name not in object_counter:
+                                    object_counter[class_name] = {"total": 0, "meso": 0, "makro": 0}
+                                object_counter[class_name]["total"] += 1
+                                if kategori in ["meso", "makro"]:
+                                    object_counter[class_name][kategori] += 1
+                                
+                                log_entry = f"{class_name} ({kategori}): {width_cm:.1f}x{height_cm:.1f}cm"
+                                measurement_log.append(log_entry)
+                                print(f"COUNTED: {log_entry}")
+                                
+                        track_history[track_id] = center_y
 
                     # Draw bounding boxes
                     if show_debug:
@@ -307,27 +327,22 @@ try:
                     print(f"Error processing detection: {e}")
                     continue
 
-        # Display video info and progress
-        video_info = f"Frame: {frame_count}/{total_frames} | Time: {current_time:.1f}s/{duration_seconds:.1f}s | Progress: {progress:.1f}%"
-        cv2.putText(frame, video_info, (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_PROGRESS, 2)
-        
-        processing_info = f"Processing FPS: {process_fps:.1f} | Skip: {skip_frames}x | {'PAUSED' if paused else 'PLAYING'}"
-        cv2.putText(frame, processing_info, (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_FPS, 2)
+        # Display info
+        cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_FPS, 2)
         
         distance_info = f"Distance: {jarak_kerja_cm}cm | cm/px: {cm_per_pixel:.5f}"
-        cv2.putText(frame, distance_info, (10, 90),
+        cv2.putText(frame, distance_info, (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_DISTANCE, 2)
         
         if distance_calibration_mode:
-            cv2.putText(frame, "DISTANCE CALIBRATION MODE", (10, 120),
+            cv2.putText(frame, "DISTANCE CALIBRATION MODE", (10, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            cv2.putText(frame, "Use +/- to adjust distance, 'c' to exit", (10, 150),
+            cv2.putText(frame, "Use +/- to adjust distance, 'c' to exit", (10, 120),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         # Show counting results
-        y_offset = 180 if distance_calibration_mode else 150
+        y_offset = 150 if distance_calibration_mode else 120
         cv2.putText(frame, "=== COUNTING RESULTS ===", (10, y_offset), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXT, 2)
         
@@ -337,27 +352,15 @@ try:
             cv2.putText(frame, text, (10, y_offset + i * 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT, 2)
 
-        # Progress bar
-        bar_width = frame_width - 20
-        bar_height = 10
-        bar_x = 10
-        bar_y = frame_height - 30
-        
-        # Background
-        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_width, bar_y + bar_height), (50, 50, 50), -1)
-        # Progress
-        progress_width = int((progress / 100) * bar_width)
-        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + progress_width, bar_y + bar_height), COLOR_PROGRESS, -1)
-
         if show_debug:
-            controls = ["SPACE=pause, d=debug, r=reset, c=distance, s=speed, q=quit"]
-            cv2.putText(frame, controls[0], (10, frame_height - 50), 
+            controls = ["Controls: 'd'=debug, 'r'=reset, 'c'=distance, '+/-'=adjust, 'q'=quit"]
+            cv2.putText(frame, controls[0], (10, frame_height - 20), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         # Display frame
         try:
             display_frame = cv2.resize(frame, (display_width, display_height))
-            cv2.imshow("Video Object Counting", display_frame)
+            cv2.imshow("Distance-Calibrated Object Counting", display_frame)
         except Exception as e:
             print(f"Display error: {e}")
 
@@ -365,9 +368,6 @@ try:
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
-        elif key == ord(" "):  # Space
-            paused = not paused
-            print(f"Video {'PAUSED' if paused else 'RESUMED'}")
         elif key == ord("d"):
             show_debug = not show_debug
             print(f"Debug mode: {'ON' if show_debug else 'OFF'}")
@@ -389,26 +389,9 @@ try:
         elif key == ord("-"):
             new_distance = max(10, jarak_kerja_cm - 5)
             update_distance_calibration(new_distance)
-        elif key == ord("s"):
-            skip_frames = 1 if skip_frames >= 4 else skip_frames * 2
-            print(f"Skip frames: {skip_frames}x (Speed: {'1x' if skip_frames == 1 else str(skip_frames) + 'x'})")
-        elif key == 81 and paused:  # Left arrow (when paused)
-            # Seek backward
-            current_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
-            new_pos = max(0, current_pos - 30)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, new_pos)
-            frame_count = int(new_pos)
-            print(f"Seek to frame {frame_count}")
-        elif key == 83 and paused:  # Right arrow (when paused)
-            # Seek forward
-            current_pos = cap.get(cv2.CAP_PROP_POS_FRAMES)
-            new_pos = min(total_frames - 1, current_pos + 30)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, new_pos)
-            frame_count = int(new_pos)
-            print(f"Seek to frame {frame_count}")
 
 except KeyboardInterrupt:
-    print("\n⏹️  Video processing stopped by user")
+    print("\n⏹️  Program stopped by user")
 except Exception as e:
     print(f"❌ Unexpected error: {e}")
 
@@ -417,15 +400,10 @@ finally:
     cap.release()
     cv2.destroyAllWindows()
     
-    # Final Summary
-    print("\n" + "="*70)
-    print("=== VIDEO PROCESSING COMPLETE ===")
-    print("="*70)
-    
-    print(f"Video: {video_path}")
-    print(f"Total frames processed: {frame_count}/{total_frames}")
-    print(f"Duration processed: {current_time:.2f}s/{duration_seconds:.2f}s")
-    print()
+    # Summary
+    print("\n" + "="*50)
+    print("=== HASIL COUNTING AKHIR ===")
+    print("="*50)
 
     total_objects = 0
     for cls, counts in object_counter.items():
@@ -439,6 +417,10 @@ finally:
 
     print(f"TOTAL SEMUA OBJEK: {total_objects}")
 
+    if fps_list:
+        avg_fps = sum(fps_list) / len(fps_list)
+        print(f"Rata-rata FPS: {avg_fps:.2f}")
+
     print("\n=== LOG PENGUKURAN ===")
     for i, log in enumerate(measurement_log, 1):
         print(f"{i}. {log}")
@@ -448,4 +430,3 @@ finally:
     print(f"  - Jarak kerja: {jarak_kerja_cm} cm")
     print(f"  - cm_per_pixel: {cm_per_pixel:.5f}")
     print("Metode: YOLO Detection + Contour Refinement + Distance Calibration")
-    print(f"Video source: {video_path}")

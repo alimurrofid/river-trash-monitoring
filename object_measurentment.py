@@ -1,17 +1,17 @@
 import cv2
 
 # ====== KALIBRASI ======
-ukuran_objek_cm = 2.5
-ukuran_objek_px = 50
-jarak_kalibrasi_cm = 100
+ukuran_objek_cm = 4.1
+ukuran_objek_px = 69
+jarak_kalibrasi_cm = 80
 k = ukuran_objek_cm / (ukuran_objek_px * jarak_kalibrasi_cm)
-jarak_kamera_cm = 110  # Ganti sesuai kondisi nyata
+jarak_kamera_cm = 80  # Ganti sesuai kondisi nyata
 cm_per_pixel = k * jarak_kamera_cm
 
 # ====== INISIALISASI KAMERA ======
 cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 cap.set(cv2.CAP_PROP_FPS, 30)
 
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))

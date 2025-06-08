@@ -6,8 +6,8 @@ import os
 # === PARAMETER YANG MUDAH DIUBAH ===
 chessboard_size = (10, 7)
 square_size = 25.0  # dalam mm
-output_dir = "webcam_checkerboard_calibration"
-image_pattern = 'webcam_checkerboard/*.jpg'
+output_dir = "camera_calibrations/calib_capture_calibration2"
+image_pattern = 'calib_capture2/*.jpg'
 show_delay = 300  # Delay tampilan per gambar dalam milidetik (0 = tunggu user, >0 = otomatis lanjut)
 # ===================================
 
@@ -65,9 +65,9 @@ h, w = test_img.shape[:2]
 newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
 undistorted = cv2.undistort(test_img, mtx, dist, None, newcameramtx)
 
-if roi != (0, 0, 0, 0):
-    x, y, w, h = roi
-    undistorted = undistorted[y:y+h, x:x+w]
+# if roi != (0, 0, 0, 0):
+#     x, y, w, h = roi
+#     undistorted = undistorted[y:y+h, x:x+w]
 
 cv2.imwrite(os.path.join(output_dir, "hasil_koreksi.jpg"), undistorted)
 show_resized('Asli', test_img, scale=0.3)

@@ -2,8 +2,8 @@ import cv2
 import os
 
 # Folder input dan output
-video_folder = 'actioncam_checkerboard/2k30fps'
-output_base_folder = 'actioncam_checkerboard_frames/2k30fps'
+video_folder = 'camera_calibrations/calib_checkerboard'
+output_base_folder = 'camera_calibrations/calib_checkerboard_frames'
 
 # Buat folder output utama jika belum ada
 os.makedirs(output_base_folder, exist_ok=True)
