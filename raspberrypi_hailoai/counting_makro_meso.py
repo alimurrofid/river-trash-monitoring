@@ -20,13 +20,18 @@ from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
 class HailoObjectCounterMacroMeso(app_callback_class):
     """Object counter with macro/meso classification based on size measurement"""
 
-    def __init__(self):
+    def __init__(self, output_video_path=None):
         super().__init__()
 
         # Configuration
         self.detection_threshold = 0.1
         self.line_y_ratio = 0.7
         self.line_y = None
+
+        # Video output configuration
+        self.output_video_path = output_video_path
+        self.video_writer = None
+        self.video_initialized = False
 
         # ====== DISTANCE CALIBRATION SETTINGS ======
         # Kalibrasi ukuran dengan jarak (sama seperti OpenCV version)
@@ -95,6 +100,48 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
         # Initialize counter structure
         self._initialize_counters()
+
+    def initialize_video_writer(self, width: int, height: int):
+        """Initialize video writer for output"""
+        if self.output_video_path and not self.video_initialized:
+            try:
+                # Create output directory if it doesn't exist
+                output_dir = os.path.dirname(self.output_video_path)
+                if output_dir and not os.path.exists(output_dir):
+                    os.makedirs(output_dir)
+                    print(f"Created output directory: {output_dir}")
+                
+                # Define codec and create VideoWriter object
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                self.video_writer = cv2.VideoWriter(
+                    self.output_video_path, 
+                    fourcc, 
+                    30.0,  # Fixed FPS at 30
+                    (width, height)
+                )
+                self.video_initialized = True
+                print(f"Video writer initialized: {self.output_video_path}")
+                print(f"Output video resolution: {width}x{height} @ 30 FPS")
+            except Exception as e:
+                print(f"Error initializing video writer: {e}")
+                self.video_writer = None
+
+    def write_frame_to_video(self, frame: np.ndarray):
+        """Write frame to output video"""
+        if self.video_writer is not None:
+            try:
+                self.video_writer.write(frame)
+            except Exception as e:
+                print(f"Error writing frame to video: {e}")
+
+    def release_video_writer(self):
+        """Release video writer"""
+        if self.video_writer is not None:
+            try:
+                self.video_writer.release()
+                print(f"Video saved successfully: {self.output_video_path}")
+            except Exception as e:
+                print(f"Error releasing video writer: {e}")
 
     def _initialize_counters(self):
         """Initialize counter structure for all classes"""
@@ -493,6 +540,9 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         print(f"  - Jarak kerja: {self.jarak_kerja_cm} cm")
         print(f"  - cm_per_pixel: {self.cm_per_pixel:.5f}")
         print("Metode: Hailo Detection + Contour Refinement + Distance Calibration")
+        
+        if self.output_video_path:
+            print(f"Output video: {self.output_video_path}")
 
 
 def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
@@ -519,6 +569,10 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
     if user_data.use_frame and all([format, width, height]):
         frame = get_numpy_from_buffer(buffer, format, width, height)
 
+        # Initialize video writer if needed
+        if not user_data.video_initialized and user_data.output_video_path:
+            user_data.initialize_video_writer(width, height)
+
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
@@ -530,6 +584,10 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
     if user_data.use_frame and frame is not None:
         user_data.draw_frame_overlay(frame, width, height, current_fps, detection_list)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        
+        # Write frame to video if output is enabled
+        user_data.write_frame_to_video(frame)
+        
         user_data.set_frame(frame)
 
     return Gst.PadProbeReturn.OK
@@ -537,12 +595,25 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
 
 def main():
     try:
-        user_data = HailoObjectCounterMacroMeso()
+        # Check if output video argument is provided
+        output_video_path = None
+        if len(os.sys.argv) > 1:
+            for i, arg in enumerate(os.sys.argv):
+                if arg == "--output-video" and i + 1 < len(os.sys.argv):
+                    output_video_path = os.sys.argv[i + 1]
+                    # Remove the output video arguments from sys.argv to avoid conflicts
+                    os.sys.argv.remove(arg)
+                    os.sys.argv.remove(output_video_path)
+                    break
+
+        user_data = HailoObjectCounterMacroMeso(output_video_path=output_video_path)
         user_data.use_frame = True
 
         app = GStreamerDetectionApp(app_callback, user_data)
 
         print("Starting Object Counter with Macro/Meso Classification")
+        if output_video_path:
+            print(f"Output video will be saved to: {output_video_path}")
         print("Camera resolution will be displayed once stream starts...")
         print("Press Ctrl+C to stop")
 
@@ -556,6 +627,7 @@ def main():
         traceback.print_exc()
     finally:
         if 'user_data' in locals():
+            user_data.release_video_writer()
             user_data.print_final_statistics()
 
 
