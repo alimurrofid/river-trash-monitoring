@@ -20,7 +20,7 @@ from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
 class HailoObjectCounterMacroMeso(app_callback_class):
     """Object counter with macro/meso classification based on size measurement"""
 
-    def __init__(self, output_video_path=None, calibration_path="camera_intrinsics.txt"):
+    def __init__(self, output_video_path=None):
         super().__init__()
 
         # Configuration
@@ -33,37 +33,22 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.video_writer = None
         self.video_initialized = False
 
-        # ====== CAMERA CALIBRATION ======
-        self.calibration_path = calibration_path
-        self.camera_matrix = None
-        self.dist_coeffs = None
-        self.use_calibration = False
-        self.map1 = None
-        self.map2 = None
-        self.roi_x = 0
-        self.roi_y = 0
-        self.roi_w = 0
-        self.roi_h = 0
-        
-        # Load camera calibration
-        self.load_camera_calibration()
-
         # ====== DISTANCE CALIBRATION SETTINGS ======
         # Kalibrasi ukuran dengan jarak (sama seperti OpenCV version)
         self.ukuran_objek_cm = 4.1           # Ukuran real objek kalibrasi (cm)
         self.ukuran_objek_px = 69            # Ukuran objek di kamera saat kalibrasi (pixel)
         self.jarak_kalibrasi_cm = 80         # Jarak kamera ke objek saat kalibrasi (cm)
-        self.jarak_kamera_sekarang_cm = 80   # Jarak kamera saat penggunaan (cm)
+        self.jarak_kerja_cm = 80             # Jarak kamera saat penggunaan (cm)
 
         # Hitung konstanta kalibrasi
         self.k = self.ukuran_objek_cm / (self.ukuran_objek_px * self.jarak_kalibrasi_cm)
-        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm
+        self.cm_per_pixel = self.k * self.jarak_kerja_cm
 
         print(f"=== KALIBRASI JARAK HAILO ===")
         print(f"Ukuran objek kalibrasi: {self.ukuran_objek_cm} cm")
         print(f"Ukuran di kamera (kalibrasi): {self.ukuran_objek_px} pixel")
         print(f"Jarak kalibrasi: {self.jarak_kalibrasi_cm} cm")
-        print(f"Jarak kamera sekarang: {self.jarak_kamera_sekarang_cm} cm")
+        print(f"Jarak kerja saat ini: {self.jarak_kerja_cm} cm")
         print(f"Konstanta k: {self.k:.8f}")
         print(f"cm_per_pixel saat ini: {self.cm_per_pixel:.5f}")
 
@@ -112,143 +97,9 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.camera_width = None
         self.camera_height = None
         self.resolution_displayed = False  # Flag to show resolution only once
-        self.calibration_maps_ready = False
 
         # Initialize counter structure
         self._initialize_counters()
-
-    def load_camera_calibration(self):
-        """Load camera intrinsics from file"""
-        if not os.path.exists(self.calibration_path):
-            print(f"❌ Camera calibration file not found: {self.calibration_path}")
-            print("⚠️  Proceeding without camera calibration...")
-            return
-
-        try:
-            calibration_data = {}
-            with open(self.calibration_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if ':' in line:
-                        key, value = line.split(':', 1)
-                        if key == 'dist':
-                            # Parse distortion coefficients
-                            dist_values = [float(x.strip()) for x in value.split(',')]
-                            calibration_data[key] = np.array(dist_values, dtype=np.float32)
-                        else:
-                            calibration_data[key] = float(value)
-
-            # Create camera matrix
-            self.camera_matrix = np.array([
-                [calibration_data['fx'], 0, calibration_data['px']],
-                [0, calibration_data['fy'], calibration_data['py']],
-                [0, 0, 1]
-            ], dtype=np.float32)
-
-            self.dist_coeffs = calibration_data['dist']
-            self.use_calibration = True
-
-            print("✅ Camera calibration loaded successfully!")
-            print(f"Camera Matrix:\n{self.camera_matrix}")
-            print(f"Distortion Coefficients: {self.dist_coeffs}")
-
-        except Exception as e:
-            print(f"❌ Error loading camera calibration: {e}")
-            print("⚠️  Proceeding without camera calibration...")
-            self.use_calibration = False
-
-    def setup_undistortion_maps(self, width: int, height: int):
-        """Setup undistortion maps when frame dimensions are known"""
-        if not self.use_calibration or self.calibration_maps_ready:
-            return
-
-        try:
-            print("🔧 Computing undistortion maps...")
-            # Use alpha=0 to remove black areas completely by cropping to valid pixels only
-            new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
-                self.camera_matrix, self.dist_coeffs, (width, height), alpha=0, 
-                newImgSize=(width, height)
-            )
-
-            # Get the ROI to crop out black areas
-            self.roi_x, self.roi_y, self.roi_w, self.roi_h = roi
-            print(f"Valid region after undistortion: x={self.roi_x}, y={self.roi_y}, w={self.roi_w}, h={self.roi_h}")
-
-            self.map1, self.map2 = cv2.initUndistortRectifyMap(
-                self.camera_matrix, self.dist_coeffs, None, new_camera_matrix, 
-                (width, height), cv2.CV_16SC2
-            )
-            
-            self.calibration_maps_ready = True
-            print("✅ Undistortion maps ready!")
-            print(f"Black areas will be cropped out. New effective resolution: {self.roi_w}x{self.roi_h}")
-
-        except Exception as e:
-            print(f"❌ Error setting up undistortion maps: {e}")
-            self.use_calibration = False
-
-    def apply_camera_calibration(self, frame: np.ndarray) -> np.ndarray:
-        """Apply camera calibration and remove black areas"""
-        if not self.use_calibration or not self.calibration_maps_ready:
-            return frame
-
-        try:
-            # Undistort the frame
-            undistorted_frame = cv2.remap(frame, self.map1, self.map2, cv2.INTER_LINEAR)
-            
-            # Crop to remove black areas - only keep the valid region
-            if self.roi_w > 0 and self.roi_h > 0:
-                cropped_frame = undistorted_frame[self.roi_y:self.roi_y+self.roi_h, 
-                                                 self.roi_x:self.roi_x+self.roi_w]
-                return cropped_frame
-            else:
-                return undistorted_frame
-
-        except Exception as e:
-            print(f"❌ Error applying camera calibration: {e}")
-            return frame
-
-    def adjust_coordinates_for_calibration(self, detections: List) -> List:
-        """Adjust detection coordinates for cropped calibrated frame"""
-        if not self.use_calibration or not self.calibration_maps_ready:
-            return detections
-
-        adjusted_detections = []
-        for det in detections:
-            # Adjust all coordinate-based values
-            adjusted_det = det.copy()
-            
-            # Adjust bounding boxes
-            bbox = det['bbox']
-            adjusted_bbox = (
-                max(0, bbox[0] - self.roi_x),
-                max(0, bbox[1] - self.roi_y),
-                min(self.roi_w, bbox[2] - self.roi_x),
-                min(self.roi_h, bbox[3] - self.roi_y)
-            )
-            adjusted_det['bbox'] = adjusted_bbox
-            
-            # Adjust accurate bbox
-            acc_bbox = det['accurate_bbox']
-            adjusted_acc_bbox = (
-                max(0, acc_bbox[0] - self.roi_x),
-                max(0, acc_bbox[1] - self.roi_y),
-                min(self.roi_w, acc_bbox[2] - self.roi_x),
-                min(self.roi_h, acc_bbox[3] - self.roi_y)
-            )
-            adjusted_det['accurate_bbox'] = adjusted_acc_bbox
-            
-            # Adjust center coordinates
-            adjusted_det['center_x'] = max(0, min(self.roi_w, det['center_x'] - self.roi_x))
-            adjusted_det['center_y'] = max(0, min(self.roi_h, det['center_y'] - self.roi_y))
-            
-            # Only include detections that are still valid after cropping
-            if (adjusted_bbox[2] > adjusted_bbox[0] and 
-                adjusted_bbox[3] > adjusted_bbox[1] and
-                adjusted_bbox[0] < self.roi_w and adjusted_bbox[1] < self.roi_h):
-                adjusted_detections.append(adjusted_det)
-
-        return adjusted_detections
 
     def initialize_video_writer(self, width: int, height: int):
         """Initialize video writer for output"""
@@ -260,23 +111,17 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                     os.makedirs(output_dir)
                     print(f"Created output directory: {output_dir}")
                 
-                # Use effective dimensions after calibration
-                effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else width
-                effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else height
-                
                 # Define codec and create VideoWriter object
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 self.video_writer = cv2.VideoWriter(
                     self.output_video_path, 
                     fourcc, 
                     30.0,  # Fixed FPS at 30
-                    (effective_width, effective_height)
+                    (width, height)
                 )
                 self.video_initialized = True
                 print(f"Video writer initialized: {self.output_video_path}")
-                print(f"Output video resolution: {effective_width}x{effective_height} @ 30 FPS")
-                if self.use_calibration and self.calibration_maps_ready:
-                    print("Video will be saved with undistorted and cropped frames")
+                print(f"Output video resolution: {width}x{height} @ 30 FPS")
             except Exception as e:
                 print(f"Error initializing video writer: {e}")
                 self.video_writer = None
@@ -313,25 +158,12 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         if not self.resolution_displayed:
             self.camera_width = width
             self.camera_height = height
-            
-            # Setup undistortion maps now that we know the dimensions
-            if self.use_calibration:
-                self.setup_undistortion_maps(width, height)
-            
-            # Display effective resolution after calibration
-            effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else width
-            effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else height
-            
             print(f"\n=== INFORMASI KAMERA ===")
-            print(f"Resolusi Kamera Original: {width} x {height} pixels")
-            if self.use_calibration and self.calibration_maps_ready:
-                print(f"Resolusi Efektif (setelah kalibrasi): {effective_width} x {effective_height} pixels")
-                print(f"Area yang dipotong: x={self.roi_x}, y={self.roi_y}")
-            print(f"Aspect Ratio: {effective_width/effective_height:.2f}:1")
-            print(f"Camera Calibration: {'ENABLED' if self.use_calibration else 'DISABLED'}")
+            print(f"Resolusi Kamera: {width} x {height} pixels")
+            print(f"Aspect Ratio: {width/height:.2f}:1")
 
             # Calculate total pixels
-            total_pixels = effective_width * effective_height
+            total_pixels = width * height
             if total_pixels >= 1920*1080:
                 quality = "Full HD (1080p)"
             elif total_pixels >= 1280*720:
@@ -341,23 +173,21 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             else:
                 quality = "Low Resolution"
 
-            print(f"Total Effective Pixels: {total_pixels:,} ({quality})")
-            print(f"Field of View (estimasi): {effective_width * self.cm_per_pixel:.1f}cm x {effective_height * self.cm_per_pixel:.1f}cm")
+            print(f"Total Pixels: {total_pixels:,} ({quality})")
+            print(f"Field of View (estimasi): {width * self.cm_per_pixel:.1f}cm x {height * self.cm_per_pixel:.1f}cm")
             print("="*30)
 
             self.resolution_displayed = True
 
     def update_distance_calibration(self, new_distance_cm):
         """Update cm_per_pixel based on new distance"""
-        self.jarak_kamera_sekarang_cm = new_distance_cm
-        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm
-        print(f"Distance updated to {self.jarak_kamera_sekarang_cm}cm, new cm_per_pixel: {self.cm_per_pixel:.5f}")
+        self.jarak_kerja_cm = new_distance_cm
+        self.cm_per_pixel = self.k * self.jarak_kerja_cm
+        print(f"Distance updated to {self.jarak_kerja_cm}cm, new cm_per_pixel: {self.cm_per_pixel:.5f}")
 
         # Update field of view if resolution is known
         if self.camera_width and self.camera_height:
-            effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else self.camera_width
-            effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else self.camera_height
-            print(f"New Field of View: {effective_width * self.cm_per_pixel:.1f}cm x {effective_height * self.cm_per_pixel:.1f}cm")
+            print(f"New Field of View: {self.camera_width * self.cm_per_pixel:.1f}cm x {self.camera_height * self.cm_per_pixel:.1f}cm")
 
         return self.cm_per_pixel
 
@@ -431,9 +261,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
     def set_line_position(self, height: int):
         if self.line_y is None:
-            # Use effective height after calibration
-            effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else height
-            self.line_y = int(effective_height * self.line_y_ratio)
+            self.line_y = int(height * self.line_y_ratio)
 
     def calculate_fps(self) -> float:
         curr_time = time.time()
@@ -605,22 +433,15 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
         # Show resolution on frame
         resolution_text = f"Resolution: {width}x{height}"
-        if self.use_calibration and self.calibration_maps_ready:
-            resolution_text += f" (Calibrated)"
         cv2.putText(frame, resolution_text, (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        distance_info = f"Distance: {self.jarak_kamera_sekarang_cm}cm | cm/px: {self.cm_per_pixel:.5f}"
+        distance_info = f"Distance: {self.jarak_kerja_cm}cm | cm/px: {self.cm_per_pixel:.5f}"
         cv2.putText(frame, distance_info, (10, 90),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
 
-        # Show calibration status
-        calib_status = f"Camera Calibration: {'ON' if self.use_calibration else 'OFF'}"
-        cv2.putText(frame, calib_status, (10, 120),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if self.use_calibration else (0, 0, 255), 2)
-
         # Draw object counts with macro/meso breakdown
-        y_offset = 150
+        y_offset = 120
         cv2.putText(frame, "=== COUNTING RESULTS ===", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
@@ -689,13 +510,8 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
         # Display resolution info in final stats
         if self.camera_width and self.camera_height:
-            print(f"Resolusi Kamera Original: {self.camera_width} x {self.camera_height} pixels")
-            if self.use_calibration and self.calibration_maps_ready:
-                print(f"Resolusi Efektif (setelah kalibrasi): {self.roi_w} x {self.roi_h} pixels")
-                print(f"Area yang dipotong: x={self.roi_x}, y={self.roi_y}")
-            effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else self.camera_width
-            effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else self.camera_height
-            print(f"Field of View: {effective_width * self.cm_per_pixel:.1f}cm x {effective_height * self.cm_per_pixel:.1f}cm")
+            print(f"Resolusi Kamera: {self.camera_width} x {self.camera_height} pixels")
+            print(f"Field of View: {self.camera_width * self.cm_per_pixel:.1f}cm x {self.camera_height * self.cm_per_pixel:.1f}cm")
             print("-" * 50)
 
         total_objects = 0
@@ -721,12 +537,9 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
         print(f"\nKalibrasi yang digunakan:")
         print(f"  - Konstanta k: {self.k:.8f}")
-        print(f"  - Jarak kamera sekarang: {self.jarak_kamera_sekarang_cm} cm")
+        print(f"  - Jarak kerja: {self.jarak_kerja_cm} cm")
         print(f"  - cm_per_pixel: {self.cm_per_pixel:.5f}")
-        print(f"  - Camera undistortion: {'ENABLED' if self.use_calibration else 'DISABLED'}")
-        if self.use_calibration and self.calibration_maps_ready:
-            print(f"  - Black area removal: ENABLED (cropped to {self.roi_w}x{self.roi_h})")
-        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration + Camera Calibration")
+        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration")
         
         if self.output_video_path:
             print(f"Output video: {self.output_video_path}")
@@ -756,38 +569,19 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
     if user_data.use_frame and all([format, width, height]):
         frame = get_numpy_from_buffer(buffer, format, width, height)
 
-        # Apply camera calibration and remove black areas
-        if user_data.use_calibration and user_data.calibration_maps_ready:
-            frame = user_data.apply_camera_calibration(frame)
-            # Update dimensions after calibration
-            if frame is not None and frame.size > 0:
-                height, width = frame.shape[:2]
-
-        # Initialize video writer if needed (after calibration)
-        if not user_data.video_initialized and user_data.output_video_path and frame is not None:
+        # Initialize video writer if needed
+        if not user_data.video_initialized and user_data.output_video_path:
             user_data.initialize_video_writer(width, height)
 
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    # Process detections with original frame dimensions for accurate coordinates
-    original_width = user_data.camera_width if user_data.camera_width else width
-    original_height = user_data.camera_height if user_data.camera_height else height
-    
-    # Get original frame for accurate measurement if calibration is used
-    original_frame = None
-    if user_data.use_calibration and user_data.use_frame and all([format, original_width, original_height]):
-        original_frame = get_numpy_from_buffer(buffer, format, original_width, original_height)
-
+    # Pass frame to process_hailo_detections for accurate measurement
     sv_detections, detection_list = user_data.process_hailo_detections(
-        hailo_detections, original_width, original_height, original_frame
+        hailo_detections, width, height, frame
     )
 
-    # Adjust coordinates for calibrated frame if needed
-    if user_data.use_calibration and user_data.calibration_maps_ready:
-        detection_list = user_data.adjust_coordinates_for_calibration(detection_list)
-
-    if user_data.use_frame and frame is not None and frame.size > 0:
+    if user_data.use_frame and frame is not None:
         user_data.draw_frame_overlay(frame, width, height, current_fps, detection_list)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         
@@ -801,35 +595,23 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
 
 def main():
     try:
-        # Check command line arguments
+        # Check if output video argument is provided
         output_video_path = None
-        calibration_path = "camera_intrinsics.txt"  # Default path
-        
         if len(os.sys.argv) > 1:
-            args_to_remove = []
             for i, arg in enumerate(os.sys.argv):
                 if arg == "--output-video" and i + 1 < len(os.sys.argv):
                     output_video_path = os.sys.argv[i + 1]
-                    args_to_remove.extend([i, i + 1])
-                elif arg == "--calibration" and i + 1 < len(os.sys.argv):
-                    calibration_path = os.sys.argv[i + 1]
-                    args_to_remove.extend([i, i + 1])
-            
-            # Remove processed arguments
-            for idx in sorted(args_to_remove, reverse=True):
-                if idx < len(os.sys.argv):
-                    del os.sys.argv[idx]
+                    # Remove the output video arguments from sys.argv to avoid conflicts
+                    os.sys.argv.remove(arg)
+                    os.sys.argv.remove(output_video_path)
+                    break
 
-        user_data = HailoObjectCounterMacroMeso(
-            output_video_path=output_video_path,
-            calibration_path=calibration_path
-        )
+        user_data = HailoObjectCounterMacroMeso(output_video_path=output_video_path)
         user_data.use_frame = True
 
         app = GStreamerDetectionApp(app_callback, user_data)
 
         print("Starting Object Counter with Macro/Meso Classification")
-        print(f"Camera calibration file: {calibration_path}")
         if output_video_path:
             print(f"Output video will be saved to: {output_video_path}")
         print("Camera resolution will be displayed once stream starts...")
