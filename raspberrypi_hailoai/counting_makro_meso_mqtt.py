@@ -7,6 +7,8 @@ import cv2
 import hailo
 import time
 import supervision as sv
+import json
+import paho.mqtt.client as mqtt
 from typing import Dict, Set, Tuple, Optional, List
 
 from hailo_apps_infra.hailo_rpi_common import (
@@ -20,7 +22,8 @@ from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
 class HailoObjectCounterMacroMeso(app_callback_class):
     """Object counter with macro/meso classification based on size measurement"""
 
-    def __init__(self, output_video_path=None, calibration_path="camera_intrinsics.txt"):
+    def __init__(self, output_video_path=None, calibration_path="camera_intrinsics.txt",
+                 mqtt_broker="127.0.0.1", mqtt_port=1883, mqtt_topic="waste/detections"):
         super().__init__()
 
         # Configuration
@@ -33,6 +36,18 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.video_writer = None
         self.video_initialized = False
 
+        # ====== MQTT CONFIGURATION ======
+        self.mqtt_broker = mqtt_broker
+        self.mqtt_port = mqtt_port
+        self.mqtt_topic = mqtt_topic
+        self.mqtt_client = None
+        self.mqtt_connected = False
+        self.last_mqtt_publish = 0
+        self.mqtt_publish_interval = 1.0  # Publish every 1 second
+
+        # Initialize MQTT
+        self.setup_mqtt()
+
         # ====== CAMERA CALIBRATION ======
         self.calibration_path = calibration_path
         self.camera_matrix = None
@@ -44,7 +59,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.roi_y = 0
         self.roi_w = 0
         self.roi_h = 0
-        
+
         # Load camera calibration
         self.load_camera_calibration()
 
@@ -117,6 +132,82 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         # Initialize counter structure
         self._initialize_counters()
 
+    def setup_mqtt(self):
+        """Initialize MQTT client and connection"""
+        try:
+            self.mqtt_client = mqtt.Client()
+
+            # Set up callbacks
+            self.mqtt_client.on_connect = self.on_mqtt_connect
+            self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
+            self.mqtt_client.on_publish = self.on_mqtt_publish
+
+            # Connect to broker
+            print(f"🔗 Connecting to MQTT broker: {self.mqtt_broker}:{self.mqtt_port}")
+            self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
+            self.mqtt_client.loop_start()
+
+        except Exception as e:
+            print(f"❌ Error setting up MQTT: {e}")
+            self.mqtt_client = None
+
+    def on_mqtt_connect(self, client, userdata, flags, rc):
+        """Callback when MQTT client connects"""
+        if rc == 0:
+            self.mqtt_connected = True
+            print(f"✅ Connected to MQTT broker successfully!")
+            print(f"📡 Publishing to topic: {self.mqtt_topic}")
+        else:
+            self.mqtt_connected = False
+            print(f"❌ Failed to connect to MQTT broker. Code: {rc}")
+
+    def on_mqtt_disconnect(self, client, userdata, rc):
+        """Callback when MQTT client disconnects"""
+        self.mqtt_connected = False
+        print(f"⚠️  Disconnected from MQTT broker. Code: {rc}")
+
+    def on_mqtt_publish(self, client, userdata, mid):
+        """Callback when message is published"""
+        # Optional: can be used for debugging publish success
+        pass
+
+    def publish_mqtt_data(self):
+        """Publish simplified counting data to MQTT"""
+        if not self.mqtt_client or not self.mqtt_connected:
+            return
+
+        current_time = time.time()
+
+        # Check if enough time has passed since last publish
+        if current_time - self.last_mqtt_publish < self.mqtt_publish_interval:
+            return
+
+        try:
+            # Get current counts
+            plastic_counts = self.object_counter.get("plastic", {"total": 0, "makro": 0, "meso": 0})
+            nonplastic_counts = self.object_counter.get("nonplastic", {"total": 0, "makro": 0, "meso": 0})
+
+            # Prepare simplified data payload - only the 4 specific counts
+            data = {
+                "plastic_makro": plastic_counts["makro"],
+                "plastic_meso": plastic_counts["meso"], 
+                "nonplastic_makro": nonplastic_counts["makro"],
+                "nonplastic_meso": nonplastic_counts["meso"]
+            }
+
+            # Publish the simplified data
+            json_data = json.dumps(data)
+            result = self.mqtt_client.publish(self.mqtt_topic, json_data)
+
+            if result.rc == mqtt.MQTT_ERR_SUCCESS:
+                self.last_mqtt_publish = current_time
+                print(f"📤 MQTT Data Published - Plastic(M:{data['plastic_makro']}, m:{data['plastic_meso']}), Non-plastic(M:{data['nonplastic_makro']}, m:{data['nonplastic_meso']})")
+            else:
+                print(f"❌ Failed to publish MQTT data. Error code: {result.rc}")
+
+        except Exception as e:
+            print(f"❌ Error publishing MQTT data: {e}")
+
     def load_camera_calibration(self):
         """Load camera intrinsics from file"""
         if not os.path.exists(self.calibration_path):
@@ -166,7 +257,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             print("🔧 Computing undistortion maps...")
             # Use alpha=0 to remove black areas completely by cropping to valid pixels only
             new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
-                self.camera_matrix, self.dist_coeffs, (width, height), alpha=0, 
+                self.camera_matrix, self.dist_coeffs, (width, height), alpha=0,
                 newImgSize=(width, height)
             )
 
@@ -175,10 +266,10 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             print(f"Valid region after undistortion: x={self.roi_x}, y={self.roi_y}, w={self.roi_w}, h={self.roi_h}")
 
             self.map1, self.map2 = cv2.initUndistortRectifyMap(
-                self.camera_matrix, self.dist_coeffs, None, new_camera_matrix, 
+                self.camera_matrix, self.dist_coeffs, None, new_camera_matrix,
                 (width, height), cv2.CV_16SC2
             )
-            
+
             self.calibration_maps_ready = True
             print("✅ Undistortion maps ready!")
             print(f"Black areas will be cropped out. New effective resolution: {self.roi_w}x{self.roi_h}")
@@ -195,10 +286,10 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         try:
             # Undistort the frame
             undistorted_frame = cv2.remap(frame, self.map1, self.map2, cv2.INTER_LINEAR)
-            
+
             # Crop to remove black areas - only keep the valid region
             if self.roi_w > 0 and self.roi_h > 0:
-                cropped_frame = undistorted_frame[self.roi_y:self.roi_y+self.roi_h, 
+                cropped_frame = undistorted_frame[self.roi_y:self.roi_y+self.roi_h,
                                                  self.roi_x:self.roi_x+self.roi_w]
                 return cropped_frame
             else:
@@ -217,7 +308,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         for det in detections:
             # Adjust all coordinate-based values
             adjusted_det = det.copy()
-            
+
             # Adjust bounding boxes
             bbox = det['bbox']
             adjusted_bbox = (
@@ -227,7 +318,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                 min(self.roi_h, bbox[3] - self.roi_y)
             )
             adjusted_det['bbox'] = adjusted_bbox
-            
+
             # Adjust accurate bbox
             acc_bbox = det['accurate_bbox']
             adjusted_acc_bbox = (
@@ -237,13 +328,13 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                 min(self.roi_h, acc_bbox[3] - self.roi_y)
             )
             adjusted_det['accurate_bbox'] = adjusted_acc_bbox
-            
+
             # Adjust center coordinates
             adjusted_det['center_x'] = max(0, min(self.roi_w, det['center_x'] - self.roi_x))
             adjusted_det['center_y'] = max(0, min(self.roi_h, det['center_y'] - self.roi_y))
-            
+
             # Only include detections that are still valid after cropping
-            if (adjusted_bbox[2] > adjusted_bbox[0] and 
+            if (adjusted_bbox[2] > adjusted_bbox[0] and
                 adjusted_bbox[3] > adjusted_bbox[1] and
                 adjusted_bbox[0] < self.roi_w and adjusted_bbox[1] < self.roi_h):
                 adjusted_detections.append(adjusted_det)
@@ -259,16 +350,16 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                 if output_dir and not os.path.exists(output_dir):
                     os.makedirs(output_dir)
                     print(f"Created output directory: {output_dir}")
-                
+
                 # Use effective dimensions after calibration
                 effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else width
                 effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else height
-                
+
                 # Define codec and create VideoWriter object
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 self.video_writer = cv2.VideoWriter(
-                    self.output_video_path, 
-                    fourcc, 
+                    self.output_video_path,
+                    fourcc,
                     30.0,  # Fixed FPS at 30
                     (effective_width, effective_height)
                 )
@@ -298,6 +389,16 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             except Exception as e:
                 print(f"Error releasing video writer: {e}")
 
+    def cleanup_mqtt(self):
+        """Clean up MQTT connection"""
+        if self.mqtt_client:
+            try:
+                self.mqtt_client.loop_stop()
+                self.mqtt_client.disconnect()
+                print("🔌 MQTT connection closed")
+            except Exception as e:
+                print(f"Error closing MQTT connection: {e}")
+
     def _initialize_counters(self):
         """Initialize counter structure for all classes"""
         for class_name in ["plastic", "nonplastic"]:
@@ -313,15 +414,15 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         if not self.resolution_displayed:
             self.camera_width = width
             self.camera_height = height
-            
+
             # Setup undistortion maps now that we know the dimensions
             if self.use_calibration:
                 self.setup_undistortion_maps(width, height)
-            
+
             # Display effective resolution after calibration
             effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else width
             effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else height
-            
+
             print(f"\n=== INFORMASI KAMERA ===")
             print(f"Resolusi Kamera Original: {width} x {height} pixels")
             if self.use_calibration and self.calibration_maps_ready:
@@ -619,8 +720,14 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         cv2.putText(frame, calib_status, (10, 120),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if self.use_calibration else (0, 0, 255), 2)
 
+        # Show MQTT status
+        mqtt_status = f"MQTT: {'CONNECTED' if self.mqtt_connected else 'DISCONNECTED'}"
+        mqtt_color = (0, 255, 0) if self.mqtt_connected else (0, 0, 255)
+        cv2.putText(frame, mqtt_status, (10, 150),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, mqtt_color, 2)
+
         # Draw object counts with macro/meso breakdown
-        y_offset = 150
+        y_offset = 180
         cv2.putText(frame, "=== COUNTING RESULTS ===", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
@@ -726,8 +833,12 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         print(f"  - Camera undistortion: {'ENABLED' if self.use_calibration else 'DISABLED'}")
         if self.use_calibration and self.calibration_maps_ready:
             print(f"  - Black area removal: ENABLED (cropped to {self.roi_w}x{self.roi_h})")
-        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration + Camera Calibration")
-        
+        print(f"  - MQTT Publishing: {'ENABLED' if self.mqtt_connected else 'DISABLED'}")
+        if self.mqtt_connected:
+            print(f"  - MQTT Broker: {self.mqtt_broker}:{self.mqtt_port}")
+            print(f"  - MQTT Topic: {self.mqtt_topic}")
+        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration + Camera Calibration + MQTT")
+
         if self.output_video_path:
             print(f"Output video: {self.output_video_path}")
 
@@ -773,7 +884,7 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
     # Process detections with original frame dimensions for accurate coordinates
     original_width = user_data.camera_width if user_data.camera_width else width
     original_height = user_data.camera_height if user_data.camera_height else height
-    
+
     # Get original frame for accurate measurement if calibration is used
     original_frame = None
     if user_data.use_calibration and user_data.use_frame and all([format, original_width, original_height]):
@@ -790,11 +901,14 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
     if user_data.use_frame and frame is not None and frame.size > 0:
         user_data.draw_frame_overlay(frame, width, height, current_fps, detection_list)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        
+
         # Write frame to video if output is enabled
         user_data.write_frame_to_video(frame)
-        
+
         user_data.set_frame(frame)
+
+    # Publish MQTT data periodically
+    user_data.publish_mqtt_data()
 
     return Gst.PadProbeReturn.OK
 
@@ -804,7 +918,10 @@ def main():
         # Check command line arguments
         output_video_path = None
         calibration_path = "camera_intrinsics.txt"  # Default path
-        
+        mqtt_broker = "127.0.0.1"  # Default MQTT broker
+        mqtt_port = 1883  # Default MQTT port
+        mqtt_topic = "waste/detections"  # Default MQTT topic
+
         if len(os.sys.argv) > 1:
             args_to_remove = []
             for i, arg in enumerate(os.sys.argv):
@@ -814,7 +931,16 @@ def main():
                 elif arg == "--calibration" and i + 1 < len(os.sys.argv):
                     calibration_path = os.sys.argv[i + 1]
                     args_to_remove.extend([i, i + 1])
-            
+                elif arg == "--mqtt-broker" and i + 1 < len(os.sys.argv):
+                    mqtt_broker = os.sys.argv[i + 1]
+                    args_to_remove.extend([i, i + 1])
+                elif arg == "--mqtt-port" and i + 1 < len(os.sys.argv):
+                    mqtt_port = int(os.sys.argv[i + 1])
+                    args_to_remove.extend([i, i + 1])
+                elif arg == "--mqtt-topic" and i + 1 < len(os.sys.argv):
+                    mqtt_topic = os.sys.argv[i + 1]
+                    args_to_remove.extend([i, i + 1])
+
             # Remove processed arguments
             for idx in sorted(args_to_remove, reverse=True):
                 if idx < len(os.sys.argv):
@@ -822,14 +948,20 @@ def main():
 
         user_data = HailoObjectCounterMacroMeso(
             output_video_path=output_video_path,
-            calibration_path=calibration_path
+            calibration_path=calibration_path,
+            mqtt_broker=mqtt_broker,
+            mqtt_port=mqtt_port,
+            mqtt_topic=mqtt_topic
         )
         user_data.use_frame = True
 
         app = GStreamerDetectionApp(app_callback, user_data)
 
-        print("Starting Object Counter with Macro/Meso Classification")
+        print("Starting Object Counter with Macro/Meso Classification and MQTT")
         print(f"Camera calibration file: {calibration_path}")
+        print(f"MQTT Configuration:")
+        print(f"  - Broker: {mqtt_broker}:{mqtt_port}")
+        print(f"  - Topic: {mqtt_topic}")
         if output_video_path:
             print(f"Output video will be saved to: {output_video_path}")
         print("Camera resolution will be displayed once stream starts...")
@@ -845,6 +977,7 @@ def main():
         traceback.print_exc()
     finally:
         if 'user_data' in locals():
+            user_data.cleanup_mqtt()
             user_data.release_video_writer()
             user_data.print_final_statistics()
 
