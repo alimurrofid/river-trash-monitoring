@@ -1,11 +1,13 @@
 import cv2
 
-# ====== KALIBRASI ======
-ukuran_objek_cm = 4.1
-ukuran_objek_px = 69
-jarak_kalibrasi_cm = 80
+# ====== KALIBRASI UKURAN DENGAN JARAK ======
+ukuran_objek_cm = 20               # Ukuran real objek kalibrasi (cm)
+ukuran_objek_px = 41               # Ukuran objek di kamera saat kalibrasi (pixel)
+jarak_kalibrasi_cm = 200           # Jarak kamera ke objek saat kalibrasi (cm)
+jarak_kamera_cm = 568.5            # Jarak kamera saat penggunaan (cm) - bisa diubah
+
+# Hitung konstanta kalibrasi
 k = ukuran_objek_cm / (ukuran_objek_px * jarak_kalibrasi_cm)
-jarak_kamera_cm = 80  # Ganti sesuai kondisi nyata
 cm_per_pixel = k * jarak_kamera_cm
 
 # ====== INISIALISASI KAMERA ======

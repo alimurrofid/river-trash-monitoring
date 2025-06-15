@@ -1,79 +1,125 @@
 import cv2
 import numpy as np
+import os
 
-# Parameter kalibrasi kamera
-fx = 783.194256191
-fy = 784.715400914
-px = 619.188277481
-py = 378.673680815
-
-# Matrix kamera
-camera_matrix = np.array([[fx, 0, px],
-                         [0, fy, py],
-                         [0, 0, 1]], dtype=np.float32)
-
-# Koefisien distorsi
-dist_coeffs = np.array([-0.344281113, 0.162875800, -0.000835462, -0.000229546, -0.043684517], dtype=np.float32)
-
-cap = cv2.VideoCapture(0)
-
-# Set ke 2K dan 30 FPS
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-cap.set(cv2.CAP_PROP_FPS, 30)
-
-# Ambil info aktual
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-fps = cap.get(cv2.CAP_PROP_FPS)
-fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
-fourcc = "".join([chr((fourcc_int >> 8 * i) & 0xFF) for i in range(4)])
-
-print(f"Resolusi: {width}x{height}")
-print(f"FPS: {fps}")
-print(f"FOURCC Codec: {fourcc}")
-
-# Hitung optimal camera matrix untuk undistortion
-new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (width, height), 1, (width, height))
-
-print(f"ROI setelah undistortion: {roi}")
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    # Undistort frame menggunakan parameter kalibrasi
-    undistorted_frame = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_camera_matrix)
+def load_camera_intrinsics(file_path):
+    """
+    Membaca parameter intrinsik kamera dari file
+    """
+    if not os.path.exists(file_path):
+        print(f"File {file_path} tidak ditemukan!")
+        return None, None
     
-    # Crop ROI jika diperlukan (opsional)
-    x, y, w, h = roi
-    if w > 0 and h > 0:
-        undistorted_frame = undistorted_frame[y:y+h, x:x+w]
+    camera_matrix = np.zeros((3, 3))
+    dist_coeffs = np.zeros((5,))
+    
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+            
+        for line in lines:
+            line = line.strip()
+            if line.startswith('fx:'):
+                camera_matrix[0, 0] = float(line.split(':')[1])
+            elif line.startswith('fy:'):
+                camera_matrix[1, 1] = float(line.split(':')[1])
+            elif line.startswith('px:'):
+                camera_matrix[0, 2] = float(line.split(':')[1])
+            elif line.startswith('py:'):
+                camera_matrix[1, 2] = float(line.split(':')[1])
+            elif line.startswith('dist:'):
+                dist_values = line.split(':')[1].split(',')
+                for i, val in enumerate(dist_values):
+                    if i < 5:  # Maksimal 5 koefisien distorsi
+                        dist_coeffs[i] = float(val)
+        
+        camera_matrix[2, 2] = 1.0  # Set elemen (2,2) = 1
+        
+        print("Parameter kamera berhasil dimuat:")
+        print(f"fx: {camera_matrix[0, 0]:.2f}")
+        print(f"fy: {camera_matrix[1, 1]:.2f}")
+        print(f"px: {camera_matrix[0, 2]:.2f}")
+        print(f"py: {camera_matrix[1, 2]:.2f}")
+        print(f"Distorsi: {dist_coeffs}")
+        
+        return camera_matrix, dist_coeffs
+        
+    except Exception as e:
+        print(f"Error membaca file kalibrasi: {e}")
+        return None, None
 
-    # Proses deteksi objek pada frame yang sudah dikoreksi
-    gray = cv2.cvtColor(undistorted_frame, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def main():
+    # Load parameter kalibrasi kamera
+    intrinsics_file = "camera_intrinsics.txt"  # Sesuaikan path file
+    camera_matrix, dist_coeffs = load_camera_intrinsics(intrinsics_file)
+    
+    if camera_matrix is None:
+        print("Menggunakan kamera tanpa kalibrasi...")
+        use_calibration = False
+    else:
+        use_calibration = True
+    
+    # Inisialisasi kamera
+    cap = cv2.VideoCapture(0)
+    
+    # Set resolusi dan FPS
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    
+    # Ambil info aktual
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fourcc = "".join([chr((fourcc_int >> 8 * i) & 0xFF) for i in range(4)])
+    
+    print(f"Resolusi: {width}x{height}")
+    print(f"FPS: {fps}")
+    print(f"FOURCC Codec: {fourcc}")
+    print(f"Kalibrasi aktif: {use_calibration}")
+    
+    # Hitung undistortion map jika menggunakan kalibrasi
+    if use_calibration:
+        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+            camera_matrix, dist_coeffs, (width, height), 1, (width, height))
+        map1, map2 = cv2.initUndistortRectifyMap(
+            camera_matrix, dist_coeffs, None, new_camera_matrix, (width, height), cv2.CV_16SC2)
+        x, y, w, h = roi  # koordinat ROI untuk cropping
+        print("Undistortion map berhasil dibuat")
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Terapkan koreksi distorsi jika tersedia
+        if use_calibration:
+            frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+            frame = frame[y:y+h, x:x+w]  # Crop bagian hitam
+        
+        # Deteksi objek
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        for cnt in contours:
+            if cv2.contourArea(cnt) < 500:
+                continue
+            x_obj, y_obj, w_obj, h_obj = cv2.boundingRect(cnt)
+            cv2.rectangle(frame, (x_obj, y_obj), (x_obj + w_obj, y_obj + h_obj), (0, 255, 0), 2)
+            cv2.putText(frame, f"W:{w_obj}px H:{h_obj}px", (x_obj, y_obj - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        
+        # Tampilkan frame
+        display_frame = cv2.resize(frame, (1280, 720))
+        cv2.imshow("Object Size Detection", display_frame)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    cap.release()
+    cv2.destroyAllWindows()
 
-    for cnt in contours:
-        if cv2.contourArea(cnt) < 500:
-            continue
-        x, y, w, h = cv2.boundingRect(cnt)
-        cv2.rectangle(undistorted_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv2.putText(undistorted_frame, f"W:{w}px H:{h}px", (x, y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-    # Resize tampilan agar muat di layar
-    display_frame = cv2.resize(undistorted_frame, (1280, 720))
-    cv2.imshow("Object Size Detection (Calibrated)", display_frame)
-
-    # Tampilkan perbandingan (opsional)
-    # cv2.imshow("Original", cv2.resize(frame, (640, 360)))
-    # cv2.imshow("Undistorted", cv2.resize(undistorted_frame, (640, 360)))
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
