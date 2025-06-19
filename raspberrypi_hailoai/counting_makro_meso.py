@@ -44,20 +44,25 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.roi_y = 0
         self.roi_w = 0
         self.roi_h = 0
-        
+
         # Load camera calibration
         self.load_camera_calibration()
 
         # ====== DISTANCE CALIBRATION SETTINGS ======
-        # Kalibrasi ukuran dengan jarak (sama seperti OpenCV version)
-        self.ukuran_objek_cm = 2.5           # Ukuran real objek kalibrasi (cm)
-        self.ukuran_objek_px = 48             # Ukuran objek di kamera saat kalibrasi (pixel)
-        self.jarak_kalibrasi_cm = 20         # Jarak kamera ke objek saat kalibrasi (cm)
+        # Kalibrasi ukuran dengan jarak (SAMA seperti OpenCV version)
+        self.ukuran_objek_cm = 20               # Ukuran real objek kalibrasi (cm)
+        self.ukuran_objek_px = 41               # Ukuran objek di kamera saat kalibrasi (pixel)
+        self.jarak_kalibrasi_cm = 200           # Jarak kamera ke objek saat kalibrasi (cm)
         self.jarak_kamera_sekarang_cm = 568.5   # Jarak kamera saat penggunaan (cm)
 
         # Hitung konstanta kalibrasi
         self.k = self.ukuran_objek_cm / (self.ukuran_objek_px * self.jarak_kalibrasi_cm)
-        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm
+        
+        # CORRECTION FACTOR: Adjust for difference between Hailo and laptop measurements
+        # Based on measurement: Hailo measures ~1.6x larger pixels than laptop
+        self.hailo_correction_factor = 0.625  # 1/1.6 = 0.625
+        
+        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm * self.hailo_correction_factor
 
         print(f"=== KALIBRASI JARAK HAILO ===")
         print(f"Ukuran objek kalibrasi: {self.ukuran_objek_cm} cm")
@@ -65,6 +70,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         print(f"Jarak kalibrasi: {self.jarak_kalibrasi_cm} cm")
         print(f"Jarak kamera sekarang: {self.jarak_kamera_sekarang_cm} cm")
         print(f"Konstanta k: {self.k:.8f}")
+        print(f"Hailo correction factor: {self.hailo_correction_factor}")
         print(f"cm_per_pixel saat ini: {self.cm_per_pixel:.5f}")
 
         # Label colors
@@ -104,6 +110,15 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.next_fallback_id = 10000
         self.plastic_fallback_tracker = {}
         self.bbox_similarity_threshold = 50
+
+        # ====== MEMORY MANAGEMENT ======
+        self.max_track_history_size = 1000
+        self.max_counted_objects_size = 1000
+        self.max_fallback_tracker_size = 100
+        self.cleanup_interval = 100  # frames
+        self.inactive_track_timeout = 30  # frames
+        self.track_last_seen = {}  # Track when each ID was last seen
+        self.fallback_last_seen = {}  # Track when each fallback ID was last seen
 
         # Size measurement settings
         self.show_size_debug = True
@@ -165,8 +180,8 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         try:
             print("🔧 Computing undistortion maps...")
             # Use alpha=0 to remove black areas completely by cropping to valid pixels only
-            new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
-                self.camera_matrix, self.dist_coeffs, (width, height), alpha=0, 
+            self.new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+                self.camera_matrix, self.dist_coeffs, (width, height), alpha=0,
                 newImgSize=(width, height)
             )
 
@@ -175,10 +190,10 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             print(f"Valid region after undistortion: x={self.roi_x}, y={self.roi_y}, w={self.roi_w}, h={self.roi_h}")
 
             self.map1, self.map2 = cv2.initUndistortRectifyMap(
-                self.camera_matrix, self.dist_coeffs, None, new_camera_matrix, 
+                self.camera_matrix, self.dist_coeffs, None, self.new_camera_matrix,
                 (width, height), cv2.CV_16SC2
             )
-            
+
             self.calibration_maps_ready = True
             print("✅ Undistortion maps ready!")
             print(f"Black areas will be cropped out. New effective resolution: {self.roi_w}x{self.roi_h}")
@@ -195,10 +210,10 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         try:
             # Undistort the frame
             undistorted_frame = cv2.remap(frame, self.map1, self.map2, cv2.INTER_LINEAR)
-            
+
             # Crop to remove black areas - only keep the valid region
             if self.roi_w > 0 and self.roi_h > 0:
-                cropped_frame = undistorted_frame[self.roi_y:self.roi_y+self.roi_h, 
+                cropped_frame = undistorted_frame[self.roi_y:self.roi_y+self.roi_h,
                                                  self.roi_x:self.roi_x+self.roi_w]
                 return cropped_frame
             else:
@@ -208,47 +223,53 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             print(f"❌ Error applying camera calibration: {e}")
             return frame
 
-    def adjust_coordinates_for_calibration(self, detections: List) -> List:
-        """Adjust detection coordinates for cropped calibrated frame"""
+    def undistort_detection_coordinates(self, bbox_coords: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+        """
+        Convert detection coordinates from distorted to undistorted frame coordinates
+        This is the key fix: we transform the detection coordinates instead of the frame
+        """
         if not self.use_calibration or not self.calibration_maps_ready:
-            return detections
-
-        adjusted_detections = []
-        for det in detections:
-            # Adjust all coordinate-based values
-            adjusted_det = det.copy()
+            return bbox_coords
+        
+        try:
+            x1, y1, x2, y2 = bbox_coords
             
-            # Adjust bounding boxes
-            bbox = det['bbox']
-            adjusted_bbox = (
-                max(0, bbox[0] - self.roi_x),
-                max(0, bbox[1] - self.roi_y),
-                min(self.roi_w, bbox[2] - self.roi_x),
-                min(self.roi_h, bbox[3] - self.roi_y)
+            # Create array of corner points
+            distorted_points = np.array([
+                [[x1, y1]], [[x2, y1]], [[x1, y2]], [[x2, y2]]
+            ], dtype=np.float32)
+            
+            # Undistort the points
+            undistorted_points = cv2.undistortPoints(
+                distorted_points, 
+                self.camera_matrix, 
+                self.dist_coeffs, 
+                P=self.new_camera_matrix
             )
-            adjusted_det['bbox'] = adjusted_bbox
             
-            # Adjust accurate bbox
-            acc_bbox = det['accurate_bbox']
-            adjusted_acc_bbox = (
-                max(0, acc_bbox[0] - self.roi_x),
-                max(0, acc_bbox[1] - self.roi_y),
-                min(self.roi_w, acc_bbox[2] - self.roi_x),
-                min(self.roi_h, acc_bbox[3] - self.roi_y)
-            )
-            adjusted_det['accurate_bbox'] = adjusted_acc_bbox
+            # Get undistorted coordinates
+            undist_coords = undistorted_points.reshape(-1, 2)
             
-            # Adjust center coordinates
-            adjusted_det['center_x'] = max(0, min(self.roi_w, det['center_x'] - self.roi_x))
-            adjusted_det['center_y'] = max(0, min(self.roi_h, det['center_y'] - self.roi_y))
+            # Find min/max to create new bbox
+            x_coords = undist_coords[:, 0]
+            y_coords = undist_coords[:, 1]
             
-            # Only include detections that are still valid after cropping
-            if (adjusted_bbox[2] > adjusted_bbox[0] and 
-                adjusted_bbox[3] > adjusted_bbox[1] and
-                adjusted_bbox[0] < self.roi_w and adjusted_bbox[1] < self.roi_h):
-                adjusted_detections.append(adjusted_det)
-
-        return adjusted_detections
+            new_x1 = max(0, int(np.min(x_coords)))
+            new_y1 = max(0, int(np.min(y_coords)))
+            new_x2 = min(self.roi_w, int(np.max(x_coords)))
+            new_y2 = min(self.roi_h, int(np.max(y_coords)))
+            
+            # Adjust for ROI cropping
+            final_x1 = max(0, new_x1 - self.roi_x)
+            final_y1 = max(0, new_y1 - self.roi_y)
+            final_x2 = max(0, new_x2 - self.roi_x)
+            final_y2 = max(0, new_y2 - self.roi_y)
+            
+            return (final_x1, final_y1, final_x2, final_y2)
+            
+        except Exception as e:
+            print(f"Error in coordinate undistortion: {e}")
+            return bbox_coords
 
     def initialize_video_writer(self, width: int, height: int):
         """Initialize video writer for output"""
@@ -259,16 +280,16 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                 if output_dir and not os.path.exists(output_dir):
                     os.makedirs(output_dir)
                     print(f"Created output directory: {output_dir}")
-                
+
                 # Use effective dimensions after calibration
                 effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else width
                 effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else height
-                
+
                 # Define codec and create VideoWriter object
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
                 self.video_writer = cv2.VideoWriter(
-                    self.output_video_path, 
-                    fourcc, 
+                    self.output_video_path,
+                    fourcc,
                     30.0,  # Fixed FPS at 30
                     (effective_width, effective_height)
                 )
@@ -308,20 +329,95 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                     "makro": 0
                 }
 
+    def cleanup_memory(self):
+        """Clean up memory by removing inactive tracks and old data"""
+        current_frame = self.frame_count
+        
+        # Clean up track_history
+        inactive_tracks = []
+        for track_id, last_seen in self.track_last_seen.items():
+            if current_frame - last_seen > self.inactive_track_timeout:
+                inactive_tracks.append(track_id)
+        
+        for track_id in inactive_tracks:
+            if track_id in self.track_history:
+                del self.track_history[track_id]
+            if track_id in self.track_last_seen:
+                del self.track_last_seen[track_id]
+        
+        # Clean up fallback tracker
+        inactive_fallback_tracks = []
+        for bbox, track_id in list(self.plastic_fallback_tracker.items()):
+            if track_id in self.fallback_last_seen:
+                if current_frame - self.fallback_last_seen[track_id] > self.inactive_track_timeout:
+                    inactive_fallback_tracks.append((bbox, track_id))
+            else:
+                # If no last_seen record, remove it
+                inactive_fallback_tracks.append((bbox, track_id))
+        
+        for bbox, track_id in inactive_fallback_tracks:
+            if bbox in self.plastic_fallback_tracker:
+                del self.plastic_fallback_tracker[bbox]
+            if track_id in self.fallback_last_seen:
+                del self.fallback_last_seen[track_id]
+        
+        # Limit sizes to prevent unbounded growth
+        if len(self.track_history) > self.max_track_history_size:
+            # Remove oldest entries
+            sorted_tracks = sorted(self.track_last_seen.items(), key=lambda x: x[1])
+            tracks_to_remove = sorted_tracks[:len(sorted_tracks) - self.max_track_history_size + 100]
+            for track_id, _ in tracks_to_remove:
+                if track_id in self.track_history:
+                    del self.track_history[track_id]
+                if track_id in self.track_last_seen:
+                    del self.track_last_seen[track_id]
+        
+        if len(self.counted_objects) > self.max_counted_objects_size:
+            # Convert to list, keep most recent half
+            counted_list = list(self.counted_objects)
+            self.counted_objects = set(counted_list[-self.max_counted_objects_size//2:])
+        
+        if len(self.plastic_fallback_tracker) > self.max_fallback_tracker_size:
+            # Remove oldest fallback tracks
+            sorted_fallback = sorted(self.fallback_last_seen.items(), key=lambda x: x[1])
+            fallback_to_remove = sorted_fallback[:len(sorted_fallback) - self.max_fallback_tracker_size + 20]
+            for track_id, _ in fallback_to_remove:
+                # Find and remove corresponding bbox
+                bbox_to_remove = None
+                for bbox, fid in self.plastic_fallback_tracker.items():
+                    if fid == track_id:
+                        bbox_to_remove = bbox
+                        break
+                if bbox_to_remove:
+                    del self.plastic_fallback_tracker[bbox_to_remove]
+                if track_id in self.fallback_last_seen:
+                    del self.fallback_last_seen[track_id]
+
+    def get_memory_usage_info(self) -> Dict:
+        """Get current memory usage information"""
+        return {
+            "track_history_size": len(self.track_history),
+            "counted_objects_size": len(self.counted_objects),
+            "fallback_tracker_size": len(self.plastic_fallback_tracker),
+            "track_last_seen_size": len(self.track_last_seen),
+            "fallback_last_seen_size": len(self.fallback_last_seen),
+            "measurement_log_size": len(self.measurement_log)
+        }
+
     def set_camera_resolution(self, width: int, height: int):
         """Set and display camera resolution (only once)"""
         if not self.resolution_displayed:
             self.camera_width = width
             self.camera_height = height
-            
+
             # Setup undistortion maps now that we know the dimensions
             if self.use_calibration:
                 self.setup_undistortion_maps(width, height)
-            
+
             # Display effective resolution after calibration
             effective_width = self.roi_w if self.use_calibration and self.calibration_maps_ready else width
             effective_height = self.roi_h if self.use_calibration and self.calibration_maps_ready else height
-            
+
             print(f"\n=== INFORMASI KAMERA ===")
             print(f"Resolusi Kamera Original: {width} x {height} pixels")
             if self.use_calibration and self.calibration_maps_ready:
@@ -350,7 +446,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
     def update_distance_calibration(self, new_distance_cm):
         """Update cm_per_pixel based on new distance"""
         self.jarak_kamera_sekarang_cm = new_distance_cm
-        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm
+        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm * self.hailo_correction_factor
         print(f"Distance updated to {self.jarak_kamera_sekarang_cm}cm, new cm_per_pixel: {self.cm_per_pixel:.5f}")
 
         # Update field of view if resolution is known
@@ -466,8 +562,9 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         for tracked_bbox, track_id in list(self.plastic_fallback_tracker.items()):
             distance = self.calculate_bbox_distance(bbox, tracked_bbox)
             if distance < self.bbox_similarity_threshold:
-                # Update the bbox position
+                # Update the bbox position and last seen time
                 self.plastic_fallback_tracker[bbox] = track_id
+                self.fallback_last_seen[track_id] = self.frame_count
                 # Remove old bbox
                 if tracked_bbox != bbox:
                     del self.plastic_fallback_tracker[tracked_bbox]
@@ -477,12 +574,16 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         new_id = self.next_fallback_id
         self.next_fallback_id += 1
         self.plastic_fallback_tracker[bbox] = new_id
+        self.fallback_last_seen[new_id] = self.frame_count
         return new_id
 
     def update_object_count(self, track_id: int, center_y: int, class_name: str,
                           width_cm: float, height_cm: float, size_category: str):
         """Update object count with size information"""
         if track_id is not None and track_id > 0:
+            # Update last seen time for this track
+            self.track_last_seen[track_id] = self.frame_count
+            
             if track_id in self.track_history:
                 prev_y = self.track_history[track_id]
 
@@ -523,13 +624,23 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             if conf <= self.detection_threshold:
                 continue
 
-            # Get bounding box
+            # Get bounding box - coordinates from Hailo are relative to original distorted frame
             bbox = detection.get_bbox()
             x1 = bbox.xmin() * width
             y1 = bbox.ymin() * height
             x2 = bbox.xmax() * width
             y2 = bbox.ymax() * height
-            bbox_coords = (int(x1), int(y1), int(x2), int(y2))
+            original_bbox = (int(x1), int(y1), int(x2), int(y2))
+
+            # Transform coordinates if using calibration
+            if self.use_calibration and self.calibration_maps_ready:
+                bbox_coords = self.undistort_detection_coordinates(original_bbox)
+                # Skip detections that are outside valid region after undistortion
+                if (bbox_coords[2] <= bbox_coords[0] or bbox_coords[3] <= bbox_coords[1] or
+                    bbox_coords[0] >= self.roi_w or bbox_coords[1] >= self.roi_h):
+                    continue
+            else:
+                bbox_coords = original_bbox
 
             # Get original track ID from Hailo
             original_track_id = 0
@@ -548,6 +659,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                 else:
                     final_track_id = 0
 
+            x1, y1, x2, y2 = bbox_coords
             center_y = int((y1 + y2) / 2)
             center_x = int((x1 + x2) / 2)
 
@@ -590,23 +702,27 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             self.update_object_count(final_track_id, center_y, class_name,
                                    width_cm, height_cm, size_category)
 
+        # Perform memory cleanup periodically
+        if self.frame_count % self.cleanup_interval == 0:
+            self.cleanup_memory()
+
         return None, valid_detections
 
     def draw_frame_overlay(self, frame: np.ndarray, width: int, height: int, fps: float, detections: List):
-        """Draw visualization overlay with size information"""
+        """Draw visualization overlay with size information and memory status"""
 
         # Draw counting line
         if self.line_y is not None:
             cv2.line(frame, (0, self.line_y), (width, self.line_y), (0, 255, 0), 4)
 
-        # Draw FPS, resolution, and distance info
+        # Draw FPS, resolution, and distance info - ADJUSTED FONT SIZES
         cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
         # Show resolution on frame
         resolution_text = f"Resolution: {width}x{height}"
         if self.use_calibration and self.calibration_maps_ready:
-            resolution_text += f" (Calibrated)"
+            resolution_text += f" (calibrated)"
         cv2.putText(frame, resolution_text, (10, 60),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
@@ -620,7 +736,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if self.use_calibration else (0, 0, 255), 2)
 
         # Draw object counts with macro/meso breakdown
-        y_offset = 150
+        y_offset = 180
         cv2.putText(frame, "=== COUNTING RESULTS ===", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
@@ -649,10 +765,10 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             label_color = self.get_label_color(label)
             size_color = self.get_size_color(size_category)
 
-            # Draw original YOLO bbox (thin line)
+            # Draw original HAILO bbox (thin line)
             if self.show_size_debug:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), label_color, 1)
-                cv2.putText(frame, "YOLO", (x1, y1-30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, label_color, 1)
+                cv2.putText(frame, "HAILO", (x1, y1-30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, label_color, 1)
 
             # Draw accurate bbox (thick line with size category color)
             cv2.rectangle(frame, (acc_x1, acc_y1), (acc_x2, acc_y2), size_color, 2)
@@ -660,7 +776,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             # Draw center point
             cv2.circle(frame, (center_x, center_y), 3, size_color, -1)
 
-            # Draw size information
+            # Draw size information - ADJUSTED FONT SIZES
             if track_id > 0:
                 label_text = f"{label}({track_id}) {confidence*100:.0f}%"
             else:
@@ -677,12 +793,18 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             if self.show_size_debug:
                 yolo_w, yolo_h = x2-x1, y2-y1
                 yolo_w_cm, yolo_h_cm = yolo_w * self.cm_per_pixel, yolo_h * self.cm_per_pixel
-                debug_text = f"YOLO: {yolo_w_cm:.1f}x{yolo_h_cm:.1f}cm | Accurate: {width_cm:.1f}x{height_cm:.1f}cm"
+                acc_w, acc_h = det['width_px'], det['height_px']
+                debug_text = f"HAILO: {yolo_w_cm:.1f}x{yolo_h_cm:.1f}cm | Accurate: {width_cm:.1f}x{height_cm:.1f}cm | px:{acc_w}x{acc_h}"
                 cv2.putText(frame, debug_text, (acc_x1, acc_y1 - 45),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                
+                # Additional debug: show cm_per_pixel
+                debug_text2 = f"cm/px: {self.cm_per_pixel:.5f} | k: {self.k:.8f}"
+                cv2.putText(frame, debug_text2, (acc_x1, acc_y1 - 60),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
     def print_final_statistics(self):
-        """Print final results with macro/meso breakdown"""
+        """Print final results with macro/meso breakdown and memory usage"""
         print("\n" + "="*50)
         print("=== HASIL COUNTING AKHIR HAILO ===")
         print("="*50)
@@ -726,8 +848,9 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         print(f"  - Camera undistortion: {'ENABLED' if self.use_calibration else 'DISABLED'}")
         if self.use_calibration and self.calibration_maps_ready:
             print(f"  - Black area removal: ENABLED (cropped to {self.roi_w}x{self.roi_h})")
-        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration + Camera Calibration")
         
+        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration + Camera Calibration + Memory Management")
+
         if self.output_video_path:
             print(f"Output video: {self.output_video_path}")
 
@@ -761,39 +884,35 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
             frame = user_data.apply_camera_calibration(frame)
             # Update dimensions after calibration
             if frame is not None and frame.size > 0:
-                height, width = frame.shape[:2]
+                display_height, display_width = frame.shape[:2]
+            else:
+                display_width = width
+                display_height = height
+        else:
+            display_width = width
+            display_height = height
 
         # Initialize video writer if needed (after calibration)
         if not user_data.video_initialized and user_data.output_video_path and frame is not None:
-            user_data.initialize_video_writer(width, height)
+            user_data.initialize_video_writer(display_width, display_height)
 
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-    # Process detections with original frame dimensions for accurate coordinates
-    original_width = user_data.camera_width if user_data.camera_width else width
-    original_height = user_data.camera_height if user_data.camera_height else height
-    
-    # Get original frame for accurate measurement if calibration is used
-    original_frame = None
-    if user_data.use_calibration and user_data.use_frame and all([format, original_width, original_height]):
-        original_frame = get_numpy_from_buffer(buffer, format, original_width, original_height)
-
+    # Process detections with original frame dimensions
+    # The coordinate transformation will be handled inside process_hailo_detections
     sv_detections, detection_list = user_data.process_hailo_detections(
-        hailo_detections, original_width, original_height, original_frame
+        hailo_detections, width, height, frame
     )
 
-    # Adjust coordinates for calibrated frame if needed
-    if user_data.use_calibration and user_data.calibration_maps_ready:
-        detection_list = user_data.adjust_coordinates_for_calibration(detection_list)
-
     if user_data.use_frame and frame is not None and frame.size > 0:
-        user_data.draw_frame_overlay(frame, width, height, current_fps, detection_list)
+        frame_height, frame_width = frame.shape[:2]
+        user_data.draw_frame_overlay(frame, frame_width, frame_height, current_fps, detection_list)
         frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        
+
         # Write frame to video if output is enabled
         user_data.write_frame_to_video(frame)
-        
+
         user_data.set_frame(frame)
 
     return Gst.PadProbeReturn.OK
@@ -801,24 +920,19 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
 
 def main():
     try:
-        # Check command line arguments
+        # Check if output video argument is provided
         output_video_path = None
-        calibration_path = "camera_intrinsics.txt"  # Default path
-        
         if len(os.sys.argv) > 1:
-            args_to_remove = []
             for i, arg in enumerate(os.sys.argv):
                 if arg == "--output-video" and i + 1 < len(os.sys.argv):
                     output_video_path = os.sys.argv[i + 1]
-                    args_to_remove.extend([i, i + 1])
-                elif arg == "--calibration" and i + 1 < len(os.sys.argv):
-                    calibration_path = os.sys.argv[i + 1]
-                    args_to_remove.extend([i, i + 1])
-            
-            # Remove processed arguments
-            for idx in sorted(args_to_remove, reverse=True):
-                if idx < len(os.sys.argv):
-                    del os.sys.argv[idx]
+                    # Remove the output video arguments from sys.argv to avoid conflicts
+                    os.sys.argv.remove(arg)
+                    os.sys.argv.remove(output_video_path)
+                    break
+
+        # Always use default calibration file path
+        calibration_path = "camera_intrinsics.txt"
 
         user_data = HailoObjectCounterMacroMeso(
             output_video_path=output_video_path,
@@ -828,11 +942,11 @@ def main():
 
         app = GStreamerDetectionApp(app_callback, user_data)
 
-        print("Starting Object Counter with Macro/Meso Classification")
-        print(f"Camera calibration file: {calibration_path}")
+        print("Starting Object Counter with Macro/Meso Classification and Memory Management")
         if output_video_path:
             print(f"Output video will be saved to: {output_video_path}")
         print("Camera resolution will be displayed once stream starts...")
+        print("Memory management enabled with automatic cleanup")
         print("Press Ctrl+C to stop")
 
         app.run()
