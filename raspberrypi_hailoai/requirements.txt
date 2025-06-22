@@ -2,4 +2,5 @@ numpy<2.0.0
 setproctitle
 opencv-python
 supervision
+paho-mqtt
 python-dotenv
