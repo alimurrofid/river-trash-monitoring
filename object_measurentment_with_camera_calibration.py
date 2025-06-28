@@ -42,10 +42,10 @@ def load_camera_intrinsics(file_path):
 
 # ====== UKURAN REFERENSI OBJEK & JARAK ======
 ukuran_objek_cm = 20
-ukuran_objek_px = 41
-jarak_kalibrasi_cm = 200
+ukuran_objek_px = 32
+jarak_kalibrasi_cm = 250
 k = ukuran_objek_cm / (ukuran_objek_px * jarak_kalibrasi_cm)
-jarak_kamera_cm = 200
+jarak_kamera_cm = 300 
 cm_per_pixel = k * jarak_kamera_cm  # akan dipakai setelah frame dikoreksi
 
 # ====== INISIALISASI KAMERA ======

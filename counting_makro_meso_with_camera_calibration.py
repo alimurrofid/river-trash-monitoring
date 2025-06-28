@@ -7,8 +7,8 @@ import os
 
 # ====== KALIBRASI UKURAN DENGAN JARAK ======
 ukuran_objek_cm = 20               # Ukuran real objek kalibrasi (cm)
-ukuran_objek_px = 41               # Ukuran objek di kamera saat kalibrasi (pixel)
-jarak_kalibrasi_cm = 200           # Jarak kamera ke objek saat kalibrasi (cm)
+ukuran_objek_px = 26               # Ukuran objek di kamera saat kalibrasi (pixel)
+jarak_kalibrasi_cm = 300           # Jarak kamera ke objek saat kalibrasi (cm)
 jarak_kerja_cm = 568.5             # Jarak kamera saat penggunaan (cm) - bisa diubah
 
 # Hitung konstanta kalibrasi
