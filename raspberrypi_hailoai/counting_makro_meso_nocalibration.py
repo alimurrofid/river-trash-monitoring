@@ -36,8 +36,8 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         # ====== DISTANCE CALIBRATION SETTINGS ======
         # Kalibrasi ukuran dengan jarak (sama seperti OpenCV version)
         self.ukuran_objek_cm = 20               # Ukuran real objek kalibrasi (cm)
-        self.ukuran_objek_px = 41               # Ukuran objek di kamera saat kalibrasi (pixel)
-        self.jarak_kalibrasi_cm = 200           # Jarak kamera ke objek saat kalibrasi (cm)
+        self.ukuran_objek_px = 26               # Ukuran objek di kamera saat kalibrasi (pixel)
+        self.jarak_kalibrasi_cm = 300           # Jarak kamera ke objek saat kalibrasi (cm)
         self.jarak_kerja_cm = 568.5             # Jarak kamera saat penggunaan (cm)
 
         # Hitung konstanta kalibrasi

@@ -1,4 +1,3 @@
-#counting_makro_meso_with_mqtt.py
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
@@ -8,13 +7,7 @@ import cv2
 import hailo
 import time
 import supervision as sv
-import json
-import paho.mqtt.client as mqtt
-import subprocess
-import select
-import sys
 from typing import Dict, Set, Tuple, Optional, List
-from dotenv import load_dotenv
 
 from hailo_apps_infra.hailo_rpi_common import (
     get_caps_from_pad,
@@ -25,53 +18,20 @@ from hailo_apps_infra.detection_pipeline import GStreamerDetectionApp
 
 
 class HailoObjectCounterMacroMeso(app_callback_class):
-    """Object counter with macro/meso classification, MQTT, and RTMP streaming"""
+    """Object counter with macro/meso classification based on size measurement"""
 
-    def __init__(self, calibration_path="camera_intrinsics.txt"):
+    def __init__(self, output_video_path=None, calibration_path="camera_intrinsics.txt"):
         super().__init__()
-
-        # Load environment variables
-        load_dotenv()
 
         # Configuration
         self.detection_threshold = 0.1
         self.line_y_ratio = 0.7
         self.line_y = None
 
-        # ====== RTMP STREAMING CONFIGURATION ======
-        self.rtmp_url = os.getenv('RTMP_URL', 'rtmp://192.168.137.1:1945/hls/test')
-        self.ffmpeg_process = None
-        self.streaming_enabled = True  # Enable streaming by default
-        self.stream_width = 854
-        self.stream_height = 480
-        self.stream_fps = 15
-        self.frames_streamed = 0
-        self.restart_attempts = 0
-        self.max_restart_attempts = 3
-
-        print(f"📡 RTMP Configuration:")
-        print(f"   - URL: {self.rtmp_url}")
-        print(f"   - Resolution: {self.stream_width}x{self.stream_height}")
-        print(f"   - FPS: {self.stream_fps}")
-
-        # ====== MQTT CONFIGURATION FROM .ENV ======
-        self.mqtt_broker = os.getenv('MQTT_BROKER', '127.0.0.1')
-        self.mqtt_port = int(os.getenv('MQTT_PORT', '1883'))
-        self.mqtt_topic = os.getenv('MQTT_TOPIC', 'waste/detections')
-        self.mqtt_client = None
-        self.mqtt_connected = False
-        self.last_mqtt_publish = 0
-        self.mqtt_publish_interval = 1.0  # Publish every 1 second
-
-        print(f"📋 MQTT Configuration loaded from .env:")
-        print(f"   - Broker: {self.mqtt_broker}")
-        print(f"   - Port: {self.mqtt_port}")
-        print(f"   - Topic: {self.mqtt_topic}")
-
-        # Initialize MQTT and RTMP
-        self.setup_mqtt()
-        if self.streaming_enabled:
-            self.setup_rtmp_streaming()
+        # Video output configuration
+        self.output_video_path = output_video_path
+        self.video_writer = None
+        self.video_initialized = False
 
         # ====== CAMERA CALIBRATION ======
         self.calibration_path = calibration_path
@@ -89,7 +49,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         self.load_camera_calibration()
 
         # ====== DISTANCE CALIBRATION SETTINGS ======
-        # Kalibrasi ukuran dengan jarak (SAMA seperti OpenCV version)
+        # Kalibrasi ukuran dengan jarak
         self.ukuran_objek_cm = 20               # Ukuran real objek kalibrasi (cm)
         self.ukuran_objek_px = 26               # Ukuran objek di kamera saat kalibrasi (pixel)
         self.jarak_kalibrasi_cm = 300           # Jarak kamera ke objek saat kalibrasi (cm)
@@ -97,12 +57,8 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
         # Hitung konstanta kalibrasi
         self.k = self.ukuran_objek_cm / (self.ukuran_objek_px * self.jarak_kalibrasi_cm)
-        
-        # CORRECTION FACTOR: Adjust for difference between Hailo and laptop measurements
-        # Based on measurement: Hailo measures ~1.8x larger pixels than laptop
-        self.hailo_correction_factor = 0.56  # 1/1.8 = 0.56
-        
-        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm * self.hailo_correction_factor
+
+        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm
 
         print(f"=== KALIBRASI JARAK HAILO ===")
         print(f"Ukuran objek kalibrasi: {self.ukuran_objek_cm} cm")
@@ -110,7 +66,6 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         print(f"Jarak kalibrasi: {self.jarak_kalibrasi_cm} cm")
         print(f"Jarak kamera sekarang: {self.jarak_kamera_sekarang_cm} cm")
         print(f"Konstanta k: {self.k:.8f}")
-        print(f"Hailo correction factor: {self.hailo_correction_factor}")
         print(f"cm_per_pixel saat ini: {self.cm_per_pixel:.5f}")
 
         # Label colors
@@ -171,227 +126,6 @@ class HailoObjectCounterMacroMeso(app_callback_class):
 
         # Initialize counter structure
         self._initialize_counters()
-
-    def setup_rtmp_streaming(self):
-        """Initialize RTMP streaming with FFmpeg"""
-        try:
-            # Test FFmpeg availability
-            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-
-            self.ffmpeg_cmd = [
-                "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
-                "-pix_fmt", "bgr24", "-s", f"{self.stream_width}x{self.stream_height}",
-                "-r", str(self.stream_fps), "-i", "-", "-an", "-c:v", "libx264",
-                "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
-                "-level", "3.0", "-b:v", "400k", "-maxrate", "400k", "-bufsize", "800k",
-                "-pix_fmt", "yuv420p", "-g", "30", "-keyint_min", "15",
-                "-sc_threshold", "0", "-x264-params", "nal-hrd=cbr:force-cfr=1",
-                "-f", "flv", self.rtmp_url
-            ]
-
-            self.ffmpeg_process = subprocess.Popen(
-                self.ffmpeg_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0
-            )
-
-            print(f"✅ RTMP streaming initialized successfully")
-
-        except subprocess.CalledProcessError:
-            print(f"❌ FFmpeg not found. RTMP streaming disabled.")
-            self.streaming_enabled = False
-        except Exception as e:
-            print(f"❌ RTMP streaming setup failed: {e}")
-            self.streaming_enabled = False
-
-    def stream_frame(self, frame):
-        """Stream frame to RTMP server"""
-        if not self.streaming_enabled or not self.ffmpeg_process:
-            return
-
-        try:
-            # Check if ffmpeg process is still running
-            if self.ffmpeg_process.poll() is not None:
-                self.restart_rtmp_streaming()
-                return
-
-            # Resize frame to streaming resolution
-            stream_frame = cv2.resize(frame, (self.stream_width, self.stream_height))
-            stream_frame = cv2.cvtColor(stream_frame, cv2.COLOR_RGB2BGR)
-            frame_bytes = stream_frame.tobytes()
-
-            # Write frame to ffmpeg stdin
-            self.ffmpeg_process.stdin.write(frame_bytes)
-            self.ffmpeg_process.stdin.flush()
-            self.frames_streamed += 1
-
-        except (BrokenPipeError, OSError) as e:
-            print(f"⚠️ Streaming pipe error, attempting restart...")
-            self.restart_rtmp_streaming()
-        except Exception as e:
-            # Only print errors periodically to avoid spam
-            if self.frames_streamed % 100 == 0:
-                print(f"❌ Streaming error: {e}")
-
-    def restart_rtmp_streaming(self):
-        """Restart RTMP streaming if it fails"""
-        self.restart_attempts += 1
-        if self.restart_attempts > self.max_restart_attempts:
-            print(f"❌ Max restart attempts ({self.max_restart_attempts}) reached. Disabling RTMP streaming.")
-            self.streaming_enabled = False
-            return
-
-        try:
-            print(f"🔄 Restarting RTMP streaming (attempt {self.restart_attempts}/{self.max_restart_attempts})")
-            
-            # Terminate existing process
-            if self.ffmpeg_process:
-                self.ffmpeg_process.terminate()
-                try:
-                    self.ffmpeg_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.ffmpeg_process.kill()
-
-            # Wait before restart
-            time.sleep(2)
-            
-            # Start new process
-            self.ffmpeg_process = subprocess.Popen(
-                self.ffmpeg_cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0
-            )
-
-            print(f"✅ RTMP streaming restarted successfully")
-
-        except Exception as e:
-            print(f"❌ Failed to restart RTMP streaming: {e}")
-            if self.restart_attempts >= self.max_restart_attempts:
-                self.streaming_enabled = False
-
-    def cleanup_rtmp_streaming(self):
-        """Clean up RTMP streaming"""
-        if self.ffmpeg_process:
-            try:
-                self.ffmpeg_process.stdin.close()
-                self.ffmpeg_process.terminate()
-                self.ffmpeg_process.wait(timeout=5)
-                print("🔌 RTMP streaming stopped")
-            except subprocess.TimeoutExpired:
-                self.ffmpeg_process.kill()
-                print("🔌 RTMP streaming force stopped")
-            except Exception as e:
-                print(f"Error stopping RTMP streaming: {e}")
-
-    def setup_mqtt(self):
-        """Initialize MQTT client and connection"""
-        try:
-            self.mqtt_client = mqtt.Client()
-
-            # Set up callbacks
-            self.mqtt_client.on_connect = self.on_mqtt_connect
-            self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
-            self.mqtt_client.on_publish = self.on_mqtt_publish
-
-            # Connect to broker
-            print(f"🔗 Connecting to MQTT broker: {self.mqtt_broker}:{self.mqtt_port}")
-            
-            # Set timeout for connection attempt
-            self.mqtt_client.connect(self.mqtt_broker, self.mqtt_port, 60)
-            self.mqtt_client.loop_start()
-            
-            # Wait for connection to establish or fail
-            import time
-            timeout = 10  # 10 seconds timeout
-            start_time = time.time()
-            
-            while not self.mqtt_connected and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-            
-            if not self.mqtt_connected:
-                raise Exception(f"Failed to connect to MQTT broker {self.mqtt_broker}:{self.mqtt_port} within {timeout} seconds")
-
-        except Exception as e:
-            print(f"❌ MQTT Error: {e}")
-            print(f"❌ Cannot connect to MQTT broker at {self.mqtt_broker}:{self.mqtt_port}")
-            print("❌ Please ensure MQTT broker is running and accessible")
-            if self.mqtt_client:
-                self.mqtt_client.loop_stop()
-            raise SystemExit(f"MQTT Connection Failed: {e}")
-
-    def on_mqtt_connect(self, client, userdata, flags, rc):
-        """Callback when MQTT client connects"""
-        if rc == 0:
-            self.mqtt_connected = True
-            print(f"✅ Connected to MQTT broker successfully!")
-            print(f"📡 Publishing to topic: {self.mqtt_topic}")
-        else:
-            self.mqtt_connected = False
-            print(f"❌ Failed to connect to MQTT broker. Code: {rc}")
-
-    def on_mqtt_disconnect(self, client, userdata, rc):
-        """Callback when MQTT client disconnects"""
-        self.mqtt_connected = False
-        print(f"⚠️  Disconnected from MQTT broker. Code: {rc}")
-
-    def on_mqtt_publish(self, client, userdata, mid):
-        """Callback when message is published"""
-        # Optional: can be used for debugging publish success
-        pass
-
-    def publish_mqtt_data(self):
-        """Publish simplified counting data to MQTT"""
-        if not self.mqtt_client or not self.mqtt_connected:
-            print("⚠️  MQTT not connected - cannot publish data")
-            return
-
-        current_time = time.time()
-
-        # Check if enough time has passed since last publish
-        if current_time - self.last_mqtt_publish < self.mqtt_publish_interval:
-            return
-
-        try:
-            # Get current counts
-            plastic_counts = self.object_counter.get("plastic", {"total": 0, "makro": 0, "meso": 0})
-            nonplastic_counts = self.object_counter.get("nonplastic", {"total": 0, "makro": 0, "meso": 0})
-
-            # Prepare simplified data payload - only the 4 specific counts
-            data = {
-                "plastic_makro": plastic_counts["makro"],
-                "plastic_meso": plastic_counts["meso"],
-                "nonplastic_makro": nonplastic_counts["makro"],
-                "nonplastic_meso": nonplastic_counts["meso"]
-            }
-
-            # Publish the simplified data
-            json_data = json.dumps(data)
-            result = self.mqtt_client.publish(self.mqtt_topic, json_data)
-
-            if result.rc == mqtt.MQTT_ERR_SUCCESS:
-                self.last_mqtt_publish = current_time
-                # Data published successfully (silent mode)
-            else:
-                print(f"❌ Failed to publish MQTT data. Error code: {result.rc}")
-
-        except Exception as e:
-            print(f"❌ Error publishing MQTT data: {e}")
-            # If publishing fails, try to reconnect
-            self.mqtt_connected = False
-
-    def cleanup_mqtt(self):
-        """Clean up MQTT connection"""
-        if self.mqtt_client:
-            try:
-                self.mqtt_client.loop_stop()
-                self.mqtt_client.disconnect()
-                print("🔌 MQTT connection closed")
-            except Exception as e:
-                print(f"Error closing MQTT connection: {e}")
 
     def load_camera_calibration(self):
         """Load camera intrinsics from file"""
@@ -491,43 +225,43 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         """
         if not self.use_calibration or not self.calibration_maps_ready:
             return bbox_coords
-        
+
         try:
             x1, y1, x2, y2 = bbox_coords
-            
+
             # Create array of corner points
             distorted_points = np.array([
                 [[x1, y1]], [[x2, y1]], [[x1, y2]], [[x2, y2]]
             ], dtype=np.float32)
-            
+
             # Undistort the points
             undistorted_points = cv2.undistortPoints(
-                distorted_points, 
-                self.camera_matrix, 
-                self.dist_coeffs, 
+                distorted_points,
+                self.camera_matrix,
+                self.dist_coeffs,
                 P=self.new_camera_matrix
             )
-            
+
             # Get undistorted coordinates
             undist_coords = undistorted_points.reshape(-1, 2)
-            
+
             # Find min/max to create new bbox
             x_coords = undist_coords[:, 0]
             y_coords = undist_coords[:, 1]
-            
+
             new_x1 = max(0, int(np.min(x_coords)))
             new_y1 = max(0, int(np.min(y_coords)))
             new_x2 = min(self.roi_w, int(np.max(x_coords)))
             new_y2 = min(self.roi_h, int(np.max(y_coords)))
-            
+
             # Adjust for ROI cropping
             final_x1 = max(0, new_x1 - self.roi_x)
             final_y1 = max(0, new_y1 - self.roi_y)
             final_x2 = max(0, new_x2 - self.roi_x)
             final_y2 = max(0, new_y2 - self.roi_y)
-            
+
             return (final_x1, final_y1, final_x2, final_y2)
-            
+
         except Exception as e:
             print(f"Error in coordinate undistortion: {e}")
             return bbox_coords
@@ -593,19 +327,19 @@ class HailoObjectCounterMacroMeso(app_callback_class):
     def cleanup_memory(self):
         """Clean up memory by removing inactive tracks and old data"""
         current_frame = self.frame_count
-        
+
         # Clean up track_history
         inactive_tracks = []
         for track_id, last_seen in self.track_last_seen.items():
             if current_frame - last_seen > self.inactive_track_timeout:
                 inactive_tracks.append(track_id)
-        
+
         for track_id in inactive_tracks:
             if track_id in self.track_history:
                 del self.track_history[track_id]
             if track_id in self.track_last_seen:
                 del self.track_last_seen[track_id]
-        
+
         # Clean up fallback tracker
         inactive_fallback_tracks = []
         for bbox, track_id in list(self.plastic_fallback_tracker.items()):
@@ -615,13 +349,13 @@ class HailoObjectCounterMacroMeso(app_callback_class):
             else:
                 # If no last_seen record, remove it
                 inactive_fallback_tracks.append((bbox, track_id))
-        
+
         for bbox, track_id in inactive_fallback_tracks:
             if bbox in self.plastic_fallback_tracker:
                 del self.plastic_fallback_tracker[bbox]
             if track_id in self.fallback_last_seen:
                 del self.fallback_last_seen[track_id]
-        
+
         # Limit sizes to prevent unbounded growth
         if len(self.track_history) > self.max_track_history_size:
             # Remove oldest entries
@@ -632,12 +366,12 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                     del self.track_history[track_id]
                 if track_id in self.track_last_seen:
                     del self.track_last_seen[track_id]
-        
+
         if len(self.counted_objects) > self.max_counted_objects_size:
             # Convert to list, keep most recent half
             counted_list = list(self.counted_objects)
             self.counted_objects = set(counted_list[-self.max_counted_objects_size//2:])
-        
+
         if len(self.plastic_fallback_tracker) > self.max_fallback_tracker_size:
             # Remove oldest fallback tracks
             sorted_fallback = sorted(self.fallback_last_seen.items(), key=lambda x: x[1])
@@ -707,7 +441,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
     def update_distance_calibration(self, new_distance_cm):
         """Update cm_per_pixel based on new distance"""
         self.jarak_kamera_sekarang_cm = new_distance_cm
-        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm * self.hailo_correction_factor
+        self.cm_per_pixel = self.k * self.jarak_kamera_sekarang_cm
         print(f"Distance updated to {self.jarak_kamera_sekarang_cm}cm, new cm_per_pixel: {self.cm_per_pixel:.5f}")
 
         # Update field of view if resolution is known
@@ -844,7 +578,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         if track_id is not None and track_id > 0:
             # Update last seen time for this track
             self.track_last_seen[track_id] = self.frame_count
-            
+
             if track_id in self.track_history:
                 prev_y = self.track_history[track_id]
 
@@ -996,20 +730,8 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         cv2.putText(frame, calib_status, (10, 120),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if self.use_calibration else (0, 0, 255), 2)
 
-        # Show MQTT status
-        mqtt_status = f"MQTT: {'CONNECTED' if self.mqtt_connected else 'DISCONNECTED'}"
-        mqtt_color = (0, 255, 0) if self.mqtt_connected else (0, 0, 255)
-        cv2.putText(frame, mqtt_status, (10, 150),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, mqtt_color, 2)
-
-        # Show RTMP status
-        rtmp_status = f"RTMP: {'CONNECTED' if self.streaming_enabled else 'DISCONNECTED'}"
-        rtmp_color = (0, 255, 0) if self.streaming_enabled else (0, 0, 255)
-        cv2.putText(frame, rtmp_status, (10, 180),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, rtmp_color, 2)
-
         # Draw object counts with macro/meso breakdown
-        y_offset = 210
+        y_offset = 180
         cv2.putText(frame, "=== COUNTING RESULTS ===", (10, y_offset),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
@@ -1070,7 +792,7 @@ class HailoObjectCounterMacroMeso(app_callback_class):
                 debug_text = f"HAILO: {yolo_w_cm:.1f}x{yolo_h_cm:.1f}cm | Accurate: {width_cm:.1f}x{height_cm:.1f}cm | px:{acc_w}x{acc_h}"
                 cv2.putText(frame, debug_text, (acc_x1, acc_y1 - 45),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-                
+
                 # Additional debug: show cm_per_pixel
                 debug_text2 = f"cm/px: {self.cm_per_pixel:.5f} | k: {self.k:.8f}"
                 cv2.putText(frame, debug_text2, (acc_x1, acc_y1 - 60),
@@ -1121,16 +843,11 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         print(f"  - Camera undistortion: {'ENABLED' if self.use_calibration else 'DISABLED'}")
         if self.use_calibration and self.calibration_maps_ready:
             print(f"  - Black area removal: ENABLED (cropped to {self.roi_w}x{self.roi_h})")
-        print(f"  - MQTT Publishing: {'ENABLED' if self.mqtt_connected else 'DISABLED'}")
-        if self.mqtt_connected:
-            print(f"  - MQTT Broker: {self.mqtt_broker}:{self.mqtt_port}")
-            print(f"  - MQTT Topic: {self.mqtt_topic}")
-        print(f"  - RTMP Streaming: {'ENABLED' if self.streaming_enabled else 'DISABLED'}")
-        if self.streaming_enabled:
-            print(f"  - RTMP URL: {self.rtmp_url}")
-            print(f"  - Frames streamed: {self.frames_streamed}")
-        
-        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration + Camera Calibration + Memory Management + MQTT + RTMP")
+
+        print("Metode: Hailo Detection + Contour Refinement + Distance Calibration + Camera Calibration + Memory Management")
+
+        if self.output_video_path:
+            print(f"Output video: {self.output_video_path}")
 
 
 def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
@@ -1154,9 +871,7 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
     current_fps = user_data.calculate_fps()
 
     frame = None
-    force_frame_processing = user_data.streaming_enabled
-
-    if (user_data.use_frame or force_frame_processing) and all([format, width, height]):
+    if user_data.use_frame and all([format, width, height]):
         frame = get_numpy_from_buffer(buffer, format, width, height)
 
         # Apply camera calibration and remove black areas
@@ -1172,6 +887,10 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
             display_width = width
             display_height = height
 
+        # Initialize video writer if needed (after calibration)
+        if not user_data.video_initialized and user_data.output_video_path and frame is not None:
+            user_data.initialize_video_writer(display_width, display_height)
+
     roi = hailo.get_roi_from_buffer(buffer)
     hailo_detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
@@ -1181,46 +900,46 @@ def app_callback(pad, info, user_data: HailoObjectCounterMacroMeso):
         hailo_detections, width, height, frame
     )
 
-    if (user_data.use_frame or force_frame_processing) and frame is not None and frame.size > 0:
-        # Keep original frame for streaming before adding overlays
-        original_frame_for_streaming = frame.copy() if user_data.streaming_enabled else None
+    if user_data.use_frame and frame is not None and frame.size > 0:
+        frame_height, frame_width = frame.shape[:2]
+        user_data.draw_frame_overlay(frame, frame_width, frame_height, current_fps, detection_list)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        if user_data.use_frame:
-            frame_height, frame_width = frame.shape[:2]
-            user_data.draw_frame_overlay(frame, frame_width, frame_height, current_fps, detection_list)
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            user_data.set_frame(frame)
+        # Write frame to video if output is enabled
+        user_data.write_frame_to_video(frame)
 
-        # Stream the original frame (without overlays) to RTMP
-        if user_data.streaming_enabled and original_frame_for_streaming is not None:
-            user_data.stream_frame(original_frame_for_streaming)
-
-    # Publish MQTT data periodically
-    user_data.publish_mqtt_data()
+        user_data.set_frame(frame)
 
     return Gst.PadProbeReturn.OK
 
 
 def main():
     try:
-        # Check if .env file exists
-        if not os.path.exists('.env'):
-            print("⚠️  .env file not found. Creating default .env file...")
-            create_default_env()
-            print("✅ Default .env file created. Please edit it if needed and restart the application.")
-            return
+        # Check if output video argument is provided
+        output_video_path = None
+        if len(os.sys.argv) > 1:
+            for i, arg in enumerate(os.sys.argv):
+                if arg == "--output-video" and i + 1 < len(os.sys.argv):
+                    output_video_path = os.sys.argv[i + 1]
+                    # Remove the output video arguments from sys.argv to avoid conflicts
+                    os.sys.argv.remove(arg)
+                    os.sys.argv.remove(output_video_path)
+                    break
 
         # Always use default calibration file path
         calibration_path = "camera_intrinsics.txt"
 
         user_data = HailoObjectCounterMacroMeso(
+            output_video_path=output_video_path,
             calibration_path=calibration_path
         )
         user_data.use_frame = True
 
         app = GStreamerDetectionApp(app_callback, user_data)
 
-        print("Starting Object Counter with Macro/Meso Classification, Memory Management, MQTT and RTMP Streaming")
+        print("Starting Object Counter with Macro/Meso Classification and Memory Management")
+        if output_video_path:
+            print(f"Output video will be saved to: {output_video_path}")
         print("Camera resolution will be displayed once stream starts...")
         print("Memory management enabled with automatic cleanup")
         print("Press Ctrl+C to stop")
@@ -1235,32 +954,8 @@ def main():
         traceback.print_exc()
     finally:
         if 'user_data' in locals():
-            user_data.cleanup_mqtt()
-            user_data.cleanup_rtmp_streaming()
+            user_data.release_video_writer()
             user_data.print_final_statistics()
-
-
-def create_default_env():
-    """Create a default .env file with MQTT and RTMP configuration"""
-    default_env_content = """# MQTT Configuration
-MQTT_BROKER=127.0.0.1
-MQTT_PORT=1883
-MQTT_TOPIC=waste/detections
-
-# RTMP Streaming Configuration
-RTMP_URL=rtmp://192.168.137.1:1945/hls/test
-"""
-    
-    try:
-        with open('.env', 'w') as f:
-            f.write(default_env_content)
-        print("📝 Created .env file with default settings:")
-        print("   - MQTT_BROKER=127.0.0.1")
-        print("   - MQTT_PORT=1883") 
-        print("   - MQTT_TOPIC=waste/detections")
-        print("   - RTMP_URL=rtmp://192.168.137.1:1945/hls/test")
-    except Exception as e:
-        print(f"❌ Error creating .env file: {e}")
 
 
 if __name__ == "__main__":
