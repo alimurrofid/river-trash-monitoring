@@ -643,9 +643,9 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         """Categorize object based on size"""
         panjang_cm = max(width_cm, height_cm)
 
-        if 0.5 <= panjang_cm < 2.5:
+        if 0.5 <= panjang_cm <= 2.5:
             return "meso"
-        elif 2.5 <= panjang_cm < 100:
+        elif 2.5 < panjang_cm <= 100:
             return "makro"
         else:
             return "lain"
@@ -955,8 +955,8 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         for cls, counts in self.object_counter.items():
             print(f"{cls}:")
             print(f"  Total: {counts['total']}")
-            print(f"  Makro (≥2.5cm): {counts['makro']}")
-            print(f"  Meso (0.5-2.5cm): {counts['meso']}")
+            print(f"  Meso (0.5–2.5 cm): {counts['meso']}")
+            print(f"  Makro (>2.5–100 cm): {counts['makro']}")
             if counts['meso'] > 0:
                 print(f"  Rasio Makro:Meso = {counts['makro']}:{counts['meso']}")
             total_objects += counts['total']

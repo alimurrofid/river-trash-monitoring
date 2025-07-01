@@ -275,10 +275,10 @@ try:
                     panjang_cm = max(width_cm, height_cm)
 
                     # Categorize
-                    if 0.5 <= panjang_cm < 2.5:
+                    if 0.5 <= panjang_cm <= 2.5:
                         kategori = "meso"
                         color = (255, 255, 0)  # Cyan
-                    elif 2.5 <= panjang_cm < 100:
+                    elif 2.5 < panjang_cm <= 100:
                         kategori = "makro"
                         color = (0, 0, 255)    # Red
                     else:
@@ -409,8 +409,8 @@ finally:
     for cls, counts in object_counter.items():
         print(f"{cls}:")
         print(f"  Total: {counts['total']}")
-        print(f"  Makro (≥2.5cm): {counts['makro']}")
-        print(f"  Meso (0.5-2.5cm): {counts['meso']}")
+        print(f"  Meso (0.5–2.5 cm): {counts['meso']}")
+        print(f"  Makro (>2.5–100 cm): {counts['makro']}")
         print(f"  Rasio Makro:Meso = {counts['makro']}:{counts['meso']}")
         total_objects += counts['total']
         print()
