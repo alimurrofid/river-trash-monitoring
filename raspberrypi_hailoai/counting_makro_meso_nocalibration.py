@@ -518,8 +518,8 @@ class HailoObjectCounterMacroMeso(app_callback_class):
         for cls, counts in self.object_counter.items():
             print(f"{cls}:")
             print(f"  Total: {counts['total']}")
-            print(f"  Meso (0.5–2.5 cm): {counts['meso']}")
-            print(f"  Makro (>2.5–100 cm): {counts['makro']}")
+            print(f"  Meso (0.5-2.5 cm): {counts['meso']}")
+            print(f"  Makro (>2.5-100 cm): {counts['makro']}")
             if counts['meso'] > 0:
                 print(f"  Rasio Makro:Meso = {counts['makro']}:{counts['meso']}")
             total_objects += counts['total']
