@@ -423,7 +423,10 @@ def setup_video_capture(video_path):
     print(f"📹 Setting up video capture from: {video_path}")
     
     # Check if file exists
-    if not os.path.exists(video_path):
+    if video_path.startswith('http://') or video_path.startswith('https://'):
+        # For online streams, OpenCV can handle URLs directly
+        print("✅ Online video stream detected.")
+    elif not os.path.exists(video_path):
         print(f"❌ Video file not found: {video_path}")
         return None
     
@@ -550,7 +553,7 @@ else:
     print("✅ Kalibrasi kamera berhasil dimuat!")
 
 # Setup video path
-video_path = "datasets/actioncam/test.mp4"
+video_path = "https://streaming.theaida.id/hls/river.m3u8"
 
 # Setup video capture
 cap = setup_video_capture(video_path)
@@ -597,7 +600,7 @@ print(f"Display size: {display_width}x{display_height}")
 # ====== LOAD MODEL ======
 print("🤖 Loading YOLO model...")
 try:
-    model = YOLO("runs/dataset_clean_flip_retrain/y11n_batch16_epochs100/weights/best.pt")
+    model = YOLO("best.pt")  # Ganti dengan model yang sesuai
     print("✅ Model loaded successfully")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
