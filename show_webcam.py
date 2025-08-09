@@ -1,3 +1,26 @@
+"""
+Simple camera mode selector with preset resolution options
+and live preview functionality.
+
+Features:
+   - 4 preset camera modes (4K, 2K, 1080p variations)
+   - Interactive menu selection
+   - Live camera preview
+   - Basic camera information display
+
+Modes:
+   1. 4K @ 30fps
+   2. 2K @ 30fps  
+   3. 1080p @ 60fps
+   4. 1080p @ 30fps
+
+Usage:
+   - Run script and select mode from menu
+   - Press 'q' to quit preview
+
+Dependencies:
+   - opencv-python
+"""
 import cv2
 
 def set_camera_mode(cap, mode="1080p30"):

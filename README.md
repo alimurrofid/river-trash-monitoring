@@ -29,9 +29,9 @@ dataset
 The `data.yaml` file contains dataset configuration, including paths and class names:
 
 ```yaml
-train: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset\train
-test: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset\test
-val: F:\Kuliah\Skripsi\Code\river-trash-monitoring\dataset\valid
+train: F:\river-trash-monitoring\dataset\train
+test: F:\river-trash-monitoring\dataset\test
+val: F:\river-trash-monitoring\dataset\valid
 
 nc: 2
 names: ["nonplastic", "plastic"]
@@ -65,7 +65,7 @@ conda activate river-trash-monitoring
 Run the following command to train the model:
 
 ```bash
-python train.py
+python train_multiple.py
 ```
 
 ---

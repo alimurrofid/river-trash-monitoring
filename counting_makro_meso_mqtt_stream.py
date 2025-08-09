@@ -1,9 +1,67 @@
+"""
+object detection, measurement and counting with network integration and streaming capabilities.
+
+Features:
+   - Video file processing with YOLO object detection and tracking
+   - Distance-based size calibration with camera distortion correction
+   - Real-time MQTT data publishing for remote monitoring
+   - RTMP live streaming of original video content
+   - Single video playthrough with complete analysis
+   - Comprehensive measurement logging and categorization
+
+Processing Mode:
+   - Single video playthrough at normal speed (33ms frame delay)
+   - Terminates when video reaches end
+   - Complete analysis of entire video content
+
+Size Categories:
+   - Meso: 0.5-2.5 cm objects
+   - Makro: 2.5-100 cm objects
+
+Configuration:
+   - Reference: 20cm object at 300cm distance = 26px
+   - Working distance: 568.5cm (calibrated for video perspective)
+   - Camera calibration from camera_intrinsics.txt
+   - MQTT/RTMP settings from .env file
+
+Input:
+   - Video file: datasets/actioncam/test.mp4
+   - Single complete analysis pass
+
+Network Integration:
+   - MQTT: Publishes detection counts (plastic/nonplastic by size)
+   - RTMP: Streams clean video feed without detection overlays
+   - Environment configuration via .env file
+
+Dependencies:
+   - ultralytics (YOLO)
+   - opencv-python
+   - paho-mqtt
+   - python-dotenv
+   - FFmpeg (for RTMP streaming)
+
+Controls:
+   - 'q': Quit before video completion
+
+Output:
+   - Video display with detection overlays and counting information
+   - MQTT data publishing for remote monitoring systems
+   - RTMP streaming of original video content
+   - Final comprehensive report with complete video analysis results
+"""
 import cv2
 import numpy as np
 import time
 from ultralytics import YOLO
 import sys
 import os
+import json
+import paho.mqtt.client as mqtt
+import subprocess
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # ====== KALIBRASI UKURAN DENGAN JARAK ======
 ukuran_objek_cm = 20               # Ukuran real objek kalibrasi (cm)
@@ -23,6 +81,295 @@ print(f"Jarak kerja saat ini: {jarak_kerja_cm} cm")
 print(f"Konstanta k: {k:.8f}")
 print(f"cm_per_pixel saat ini: {cm_per_pixel:.5f}")
 print()
+
+# ====== MQTT CONFIGURATION ======
+mqtt_broker = os.getenv('MQTT_BROKER', '127.0.0.1')
+mqtt_port = int(os.getenv('MQTT_PORT', '1883'))
+mqtt_topic = os.getenv('MQTT_TOPIC', 'waste/detections')
+mqtt_client = None
+mqtt_connected = False
+last_mqtt_publish = 0
+mqtt_publish_interval = 1.0  # Publish every 1 second
+
+print(f"📋 MQTT Configuration loaded from .env:")
+print(f"   - Broker: {mqtt_broker}")
+print(f"   - Port: {mqtt_port}")
+print(f"   - Topic: {mqtt_topic}")
+
+# ====== RTMP STREAMING CONFIGURATION ======
+rtmp_url = os.getenv('RTMP_URL', 'rtmp://192.168.137.1:1945/hls/test')
+ffmpeg_process = None
+ffmpeg_cmd = None
+streaming_enabled = True  # Enable streaming by default
+stream_width = 854
+stream_height = 480
+stream_fps = 15
+frames_streamed = 0
+restart_attempts = 0
+max_restart_attempts = 3
+
+print(f"📡 RTMP Configuration:")
+print(f"   - URL: {rtmp_url}")
+print(f"   - Resolution: {stream_width}x{stream_height}")
+print(f"   - FPS: {stream_fps}")
+
+def create_default_env():
+    """Create a default .env file with MQTT and RTMP configuration"""
+    default_env_content = """# MQTT Configuration
+MQTT_BROKER=127.0.0.1
+MQTT_PORT=1883
+MQTT_TOPIC=waste/detections
+
+# RTMP Streaming Configuration
+RTMP_URL=rtmp://192.168.137.1:1945/hls/test
+"""
+    
+    try:
+        with open('.env', 'w') as f:
+            f.write(default_env_content)
+        print("📝 Created .env file with default settings:")
+        print("   - MQTT_BROKER=127.0.0.1")
+        print("   - MQTT_PORT=1883") 
+        print("   - MQTT_TOPIC=waste/detections")
+        print("   - RTMP_URL=rtmp://192.168.137.1:1945/hls/test")
+    except Exception as e:
+        print(f"❌ Error creating .env file: {e}")
+
+def setup_mqtt():
+    """Initialize MQTT client and connection"""
+    global mqtt_client, mqtt_connected
+    try:
+        mqtt_client = mqtt.Client()
+
+        # Set up callbacks
+        mqtt_client.on_connect = on_mqtt_connect
+        mqtt_client.on_disconnect = on_mqtt_disconnect
+        mqtt_client.on_publish = on_mqtt_publish
+
+        # Connect to broker
+        print(f"🔗 Connecting to MQTT broker: {mqtt_broker}:{mqtt_port}")
+        
+        # Set timeout for connection attempt
+        mqtt_client.connect(mqtt_broker, mqtt_port, 60)
+        mqtt_client.loop_start()
+        
+        # Wait for connection to establish or fail
+        timeout = 10  # 10 seconds timeout
+        start_time = time.time()
+        
+        while not mqtt_connected and (time.time() - start_time) < timeout:
+            time.sleep(0.1)
+        
+        if not mqtt_connected:
+            raise Exception(f"Failed to connect to MQTT broker {mqtt_broker}:{mqtt_port} within {timeout} seconds")
+
+    except Exception as e:
+        print(f"❌ MQTT Error: {e}")
+        print(f"❌ Cannot connect to MQTT broker at {mqtt_broker}:{mqtt_port}")
+        print("❌ Please ensure MQTT broker is running and accessible")
+        if mqtt_client:
+            mqtt_client.loop_stop()
+        raise SystemExit(f"MQTT Connection Failed: {e}")
+
+def on_mqtt_connect(client, userdata, flags, rc):
+    """Callback when MQTT client connects"""
+    global mqtt_connected
+    if rc == 0:
+        mqtt_connected = True
+        print(f"✅ Connected to MQTT broker successfully!")
+        print(f"📡 Publishing to topic: {mqtt_topic}")
+    else:
+        mqtt_connected = False
+        print(f"❌ Failed to connect to MQTT broker. Code: {rc}")
+
+def on_mqtt_disconnect(client, userdata, rc):
+    """Callback when MQTT client disconnects"""
+    global mqtt_connected
+    mqtt_connected = False
+    print(f"⚠️  Disconnected from MQTT broker. Code: {rc}")
+
+def on_mqtt_publish(client, userdata, mid):
+    """Callback when message is published"""
+    # Optional: can be used for debugging publish success
+    pass
+
+def publish_mqtt_data(object_counter):
+    """Publish simplified counting data to MQTT"""
+    global last_mqtt_publish, mqtt_connected
+    if not mqtt_client or not mqtt_connected:
+        return
+
+    current_time = time.time()
+
+    # Check if enough time has passed since last publish
+    if current_time - last_mqtt_publish < mqtt_publish_interval:
+        return
+
+    try:
+        # Get current counts
+        plastic_counts = object_counter.get("plastic", {"total": 0, "makro": 0, "meso": 0})
+        nonplastic_counts = object_counter.get("nonplastic", {"total": 0, "makro": 0, "meso": 0})
+
+        # Prepare simplified data payload - only the 4 specific counts
+        data = {
+            "plastic_makro": plastic_counts["makro"],
+            "plastic_meso": plastic_counts["meso"],
+            "nonplastic_makro": nonplastic_counts["makro"],
+            "nonplastic_meso": nonplastic_counts["meso"]
+        }
+
+        # Publish the simplified data
+        json_data = json.dumps(data)
+        result = mqtt_client.publish(mqtt_topic, json_data)
+
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            last_mqtt_publish = current_time
+            # Data published successfully (silent mode)
+        else:
+            print(f"❌ Failed to publish MQTT data. Error code: {result.rc}")
+
+    except Exception as e:
+        print(f"❌ Error publishing MQTT data: {e}")
+        # If publishing fails, try to reconnect
+        mqtt_connected = False
+
+def cleanup_mqtt():
+    """Clean up MQTT connection"""
+    if mqtt_client:
+        try:
+            mqtt_client.loop_stop()
+            mqtt_client.disconnect()
+            print("🔌 MQTT connection closed")
+        except Exception as e:
+            print(f"Error closing MQTT connection: {e}")
+
+def setup_rtmp_streaming():
+    """Initialize RTMP streaming with FFmpeg"""
+    global ffmpeg_process, streaming_enabled, ffmpeg_cmd
+    try:
+        # Test FFmpeg availability
+        subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-pix_fmt", "bgr24", "-s", f"{stream_width}x{stream_height}",
+            "-r", str(stream_fps), "-i", "-", "-an", "-c:v", "libx264",
+            "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
+            "-level", "3.0", "-b:v", "400k", "-maxrate", "400k", "-bufsize", "800k",
+            "-pix_fmt", "yuv420p", "-g", "30", "-keyint_min", "15",
+            "-sc_threshold", "0", "-x264-params", "nal-hrd=cbr:force-cfr=1",
+            "-f", "flv", rtmp_url
+        ]
+
+        ffmpeg_process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0
+        )
+
+        print(f"✅ RTMP streaming initialized successfully")
+
+    except subprocess.CalledProcessError:
+        print(f"❌ FFmpeg not found. RTMP streaming disabled.")
+        streaming_enabled = False
+    except Exception as e:
+        print(f"❌ RTMP streaming setup failed: {e}")
+        streaming_enabled = False
+
+def stream_frame(frame):
+    """Stream frame to RTMP server"""
+    global ffmpeg_process, frames_streamed
+    if not streaming_enabled or not ffmpeg_process:
+        return
+
+    try:
+        # Check if ffmpeg process is still running
+        if ffmpeg_process.poll() is not None:
+            restart_rtmp_streaming()
+            return
+
+        # Resize frame to streaming resolution
+        stream_frame = cv2.resize(frame, (stream_width, stream_height))
+        frame_bytes = stream_frame.tobytes()
+
+        # Write frame to ffmpeg stdin
+        ffmpeg_process.stdin.write(frame_bytes)
+        ffmpeg_process.stdin.flush()
+        frames_streamed += 1
+
+    except (BrokenPipeError, OSError) as e:
+        print(f"⚠️ Streaming pipe error, attempting restart...")
+        restart_rtmp_streaming()
+    except Exception as e:
+        # Only print errors periodically to avoid spam
+        if frames_streamed % 100 == 0:
+            print(f"❌ Streaming error: {e}")
+
+def restart_rtmp_streaming():
+    """Restart RTMP streaming if it fails"""
+    global restart_attempts, ffmpeg_process, streaming_enabled, ffmpeg_cmd
+    restart_attempts += 1
+    if restart_attempts > max_restart_attempts:
+        print(f"❌ Max restart attempts ({max_restart_attempts}) reached. Disabling RTMP streaming.")
+        streaming_enabled = False
+        return
+
+    try:
+        print(f"🔄 Restarting RTMP streaming (attempt {restart_attempts}/{max_restart_attempts})")
+        
+        # Terminate existing process
+        if ffmpeg_process:
+            ffmpeg_process.terminate()
+            try:
+                ffmpeg_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                ffmpeg_process.kill()
+
+        # Wait before restart
+        time.sleep(2)
+        
+        # Start new process
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-pix_fmt", "bgr24", "-s", f"{stream_width}x{stream_height}",
+            "-r", str(stream_fps), "-i", "-", "-an", "-c:v", "libx264",
+            "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
+            "-level", "3.0", "-b:v", "400k", "-maxrate", "400k", "-bufsize", "800k",
+            "-pix_fmt", "yuv420p", "-g", "30", "-keyint_min", "15",
+            "-sc_threshold", "0", "-x264-params", "nal-hrd=cbr:force-cfr=1",
+            "-f", "flv", rtmp_url
+        ]
+        
+        ffmpeg_process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0
+        )
+
+        print(f"✅ RTMP streaming restarted successfully")
+
+    except Exception as e:
+        print(f"❌ Failed to restart RTMP streaming: {e}")
+        if restart_attempts >= max_restart_attempts:
+            streaming_enabled = False
+
+def cleanup_rtmp_streaming():
+    """Clean up RTMP streaming"""
+    if ffmpeg_process:
+        try:
+            ffmpeg_process.stdin.close()
+            ffmpeg_process.terminate()
+            ffmpeg_process.wait(timeout=5)
+            print("🔌 RTMP streaming stopped")
+        except subprocess.TimeoutExpired:
+            ffmpeg_process.kill()
+            print("🔌 RTMP streaming force stopped")
+        except Exception as e:
+            print(f"Error stopping RTMP streaming: {e}")
 
 def load_camera_intrinsics(file_path):
     """
@@ -178,6 +525,18 @@ def get_accurate_measurement(frame, yolo_bbox):
 # ====== MAIN PROGRAM START ======
 print("🚀 Starting Object Counting Program with Camera Calibration...")
 
+# Check if .env file exists
+if not os.path.exists('.env'):
+    print("⚠️  .env file not found. Creating default .env file...")
+    create_default_env()
+    print("✅ Default .env file created. Please edit it if needed and restart the application.")
+    sys.exit()
+
+# Initialize MQTT and RTMP
+setup_mqtt()
+if streaming_enabled:
+    setup_rtmp_streaming()
+
 # Load parameter kalibrasi kamera
 print("🔧 Loading camera calibration...")
 intrinsics_file = "camera_intrinsics.txt"  # Sesuaikan path file
@@ -202,6 +561,8 @@ if cap is None:
     print("2. Check video file format (MP4, AVI, MOV supported)")
     print("3. Check file permissions")
     print("4. Try different video codec")
+    cleanup_mqtt()
+    cleanup_rtmp_streaming()
     sys.exit()
 
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -242,6 +603,8 @@ except Exception as e:
     print(f"❌ Error loading model: {e}")
     print("Make sure the model path is correct!")
     cap.release()
+    cleanup_mqtt()
+    cleanup_rtmp_streaming()
     sys.exit()
 
 # ====== WARNA UI ======
@@ -267,15 +630,12 @@ frame_count = 0
 last_results = None
 current_frame_idx = 0
 
-# Debug info
-show_debug = True
+# Measurement log
 measurement_log = []
-distance_calibration_mode = False
 
 print("✅ Program ready!")
 print("\nControls:")
 print("- 'q': Quit")
-print("- 'd': Toggle debug mode")
 print("\nPress any key in the video window to start...")
 
 # Create window
@@ -304,6 +664,9 @@ try:
         fps_list.append(fps)
 
         input_frame = frame.copy()
+
+        # Keep original frame for streaming (before overlays)
+        original_frame_for_streaming = frame.copy() if streaming_enabled else None
 
         # Run YOLO detection with batch processing
         if frame_count % batch_interval == 0:
@@ -371,19 +734,8 @@ try:
                                 
                         track_history[track_id] = center_y
 
-                    # Draw bounding boxes
-                    if show_debug:
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_YOLO, 1)
-                        cv2.putText(frame, "YOLO", (x1, y1-30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_YOLO, 1)
-                    
+                    # Draw bounding boxes - removed debug mode, only show accurate bbox
                     cv2.rectangle(frame, (acc_x1, acc_y1), (acc_x2, acc_y2), color, 2)
-                    
-                    if show_debug:
-                        yolo_w, yolo_h = x2-x1, y2-y1
-                        yolo_w_cm, yolo_h_cm = yolo_w * cm_per_pixel, yolo_h * cm_per_pixel
-                        label_debug = f"YOLO: {yolo_w_cm:.1f}x{yolo_h_cm:.1f}cm | Accurate: {width_cm:.1f}x{height_cm:.1f}cm"
-                        cv2.putText(frame, label_debug, (acc_x1, acc_y1 - 35), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
                     
                     label = f"{class_name}({track_id}) {confidence*100:.0f}% | {width_cm:.1f}x{height_cm:.1f}cm [{kategori}]"
                     cv2.putText(frame, label, (acc_x1, acc_y1 - 10), 
@@ -406,14 +758,20 @@ try:
         cv2.putText(frame, calib_status, (10, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_CALIBRATION, 2)
         
-        if distance_calibration_mode:
-            cv2.putText(frame, "DISTANCE CALIBRATION MODE", (10, 120),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            cv2.putText(frame, "Use +/- to adjust distance, 'c' to exit", (10, 150),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        # MQTT status
+        mqtt_status = f"MQTT: {'CONNECTED' if mqtt_connected else 'DISCONNECTED'}"
+        mqtt_color = (0, 255, 0) if mqtt_connected else (0, 0, 255)
+        cv2.putText(frame, mqtt_status, (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, mqtt_color, 2)
+
+        # RTMP status
+        rtmp_status = f"RTMP: {'CONNECTED' if streaming_enabled else 'DISCONNECTED'}"
+        rtmp_color = (0, 255, 0) if streaming_enabled else (0, 0, 255)
+        cv2.putText(frame, rtmp_status, (10, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, rtmp_color, 2)
 
         # Show counting results
-        y_offset = 180 if distance_calibration_mode else 150
+        y_offset = 180
         cv2.putText(frame, "=== COUNTING RESULTS ===", (10, y_offset), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXT, 2)
         
@@ -422,6 +780,13 @@ try:
             text = f"{cls}: Total={counts['total']} | Makro={counts['makro']} | Meso={counts['meso']}"
             cv2.putText(frame, text, (10, y_offset + i * 25),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT, 2)
+
+        # Stream the original frame (without overlays) to RTMP
+        if streaming_enabled and original_frame_for_streaming is not None:
+            stream_frame(original_frame_for_streaming)
+
+        # Publish MQTT data periodically
+        publish_mqtt_data(object_counter)
 
         # Display frame
         try:
@@ -436,9 +801,6 @@ try:
         
         if key == ord("q"):
             break
-        elif key == ord("d"):
-            show_debug = not show_debug
-            print(f"Debug mode: {'ON' if show_debug else 'OFF'}")
 
 except KeyboardInterrupt:
     print("\n⏹️  Program stopped by user")
@@ -449,6 +811,8 @@ finally:
     # Cleanup
     cap.release()
     cv2.destroyAllWindows()
+    cleanup_mqtt()
+    cleanup_rtmp_streaming()
     
     # Summary
     print("\n" + "="*50)
@@ -480,5 +844,12 @@ finally:
     print(f"  - Jarak kerja: {jarak_kerja_cm} cm")
     print(f"  - cm_per_pixel: {cm_per_pixel:.5f}")
     print(f"  - Kalibrasi kamera: {'AKTIF' if use_calibration else 'TIDAK AKTIF'}")
-    print("Metode: YOLO Detection + Contour Refinement + Distance Calibration + Camera Calibration")
-    print(f"Video source: {video_path}")
+    print(f"  - MQTT Publishing: {'ENABLED' if mqtt_connected else 'DISABLED'}")
+    if mqtt_connected:
+        print(f"  - MQTT Broker: {mqtt_broker}:{mqtt_port}")
+        print(f"  - MQTT Topic: {mqtt_topic}")
+    print(f"  - RTMP Streaming: {'ENABLED' if streaming_enabled else 'DISABLED'}")
+    if streaming_enabled:
+        print(f"  - RTMP URL: {rtmp_url}")
+        print(f"  - Frames streamed: {frames_streamed}")
+    print("Metode: YOLO Detection + Contour Refinement + Distance Calibration + Camera Calibration + MQTT + RTMP")

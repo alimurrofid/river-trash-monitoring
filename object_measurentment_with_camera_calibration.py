@@ -1,3 +1,47 @@
+"""
+Real-time object size measurement system using camera calibration
+and distance-based scaling for accurate dimensional analysis.
+
+Features:
+   - Camera distortion correction using intrinsic parameters
+   - Distance-based size calibration for accurate measurements
+   - Real-time object detection using contour analysis
+   - Live size measurement display in pixels and centimeters
+   - Automatic undistortion mapping for improved accuracy
+
+Calibration System:
+   - Reference object: 20cm at 250cm distance = 32px
+   - Working distance: 300cm (adjustable)
+   - Camera intrinsics loaded from camera_intrinsics.txt
+   - Automatic undistortion map generation
+
+Processing Pipeline:
+   1. Load camera intrinsic parameters from file
+   2. Generate undistortion maps for real-time correction
+   3. Apply distortion correction to each frame
+   4. Detect objects using binary thresholding and contours
+   5. Calculate real-world dimensions using distance calibration
+   6. Display measurements in both pixels and centimeters
+
+Configuration:
+   - Camera resolution: 1280x720 @ 30fps
+   - Minimum contour area: 500 pixels
+   - Threshold value: 100 (binary inverse)
+   - Display resolution: 1280x720 (resized if needed)
+
+Dependencies:
+   - opencv-python
+   - numpy
+
+Controls:
+   - 'q': Quit application
+
+Output:
+   - Real-time video feed with object measurements
+   - Bounding boxes around detected objects
+   - Size labels showing pixel and centimeter dimensions
+   - Calibration status and measurement accuracy information
+"""
 import cv2
 import numpy as np
 import os

@@ -1,3 +1,40 @@
+"""
+object detection and counting with YOLO tracking across a detection line.
+
+Features:
+   - Basic YOLO object detection and tracking
+   - Simple counting system using horizontal detection line
+   - Real-time FPS monitoring and display
+   - Object counting with track ID management
+   - Batch processing for improved performance
+
+Processing Mode:
+   - Continuous video playback until completion
+   - Detection line at 60% of frame height
+   - Batch inference every 2 frames for efficiency
+
+Configuration:
+   - Input video: datasets/actioncam/AE2X00017.mp4
+   - Detection line position: 60% of frame height
+   - Batch interval: 2 frames
+
+Model:
+   - YOLO model: runs/dataset_clean_flip_retrain/y11n_batch16_epochs100/weights/best.pt
+
+Dependencies:
+   - ultralytics (YOLO)
+   - opencv-python
+
+Controls:
+   - 'q': Quit video playback
+
+Output:
+   - Real-time video display with detection overlays
+   - Live counting results for each object class
+   - FPS performance monitoring
+   - Final counting summary with average FPS
+   - Optional video output (currently commented out)
+"""
 import cv2
 import time
 from ultralytics import YOLO

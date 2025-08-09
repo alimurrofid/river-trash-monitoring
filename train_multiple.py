@@ -19,7 +19,7 @@ def train_model(model_path, data_yaml, project_name, run_name):
         data=data_yaml,
         batch=16,
         epochs=100,
-        workers=2,
+        workers=0,
         device=0,
         project=project_name,
         name=run_name,
@@ -41,15 +41,10 @@ if __name__ == "__main__":
     # Daftar dataset dan konfigurasi
     configs = [
         {
-            "data_yaml": "dataset_clean_flip/data.yaml",
-            "project_name": "runs/dataset_clean_flip_retrain",
+            "data_yaml": "datasets/datalabelstudio_75_15_10_clean_flip/data.yaml",
+            "project_name": "runs/datalabelstudio_75_15_10_clean_flip_train",
             "run_name": "y8n_batch16_epochs100",
-        },
-        {
-            "data_yaml": "withoutgrogol/data.yaml",
-            "project_name": "runs/withoutgrogol_retrain",
-            "run_name": "y8n_batch16_epochs100",
-        },
+        }
     ]
 
     # Jalankan training satu per satu

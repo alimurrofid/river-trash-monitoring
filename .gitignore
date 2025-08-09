@@ -13,3 +13,5 @@
 /runs
 yolo*.pt
 !yolo11n.pt
+
+.env

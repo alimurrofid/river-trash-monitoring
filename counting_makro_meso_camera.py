@@ -1,3 +1,37 @@
+"""
+Real-time object detection, measurement and counting system using YOLO model
+with distance-based size calibration and interactive controls.
+
+Features:
+   - Automatic camera detection and setup
+   - YOLO object detection with tracking and counting
+   - Distance-based size calibration for accurate measurements
+   - Contour refinement for precise bounding boxes
+   - Real-time size categorization (meso/makro)
+   - Interactive distance calibration mode
+   - Comprehensive measurement logging
+
+Size Categories:
+   - Meso: 0.5-2.5 cm objects  
+   - Makro: 2.5-100 cm objects
+
+Calibration Setup:
+   - Reference: 4.1cm object at 80cm distance = 69px
+   - Working distance: 80cm (adjustable with +/- keys)
+
+Controls:
+   - 'd': Toggle debug info display
+   - 'r': Reset all counters
+   - 'c': Toggle distance calibration mode
+   - '+/-': Adjust working distance in calibration mode
+   - 'q': Quit and show final results
+
+Output:
+   - Real-time counting with crossing line detection
+   - Size measurements in pixels and centimeters
+   - Final statistics with meso/makro ratios
+   - Complete measurement log
+"""
 import cv2
 import time
 from ultralytics import YOLO

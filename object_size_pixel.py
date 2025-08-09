@@ -1,3 +1,49 @@
+"""
+Simple real-time object detection and measurement system
+using basic computer vision techniques with webcam input.
+
+Features:
+   - Live webcam feed with configurable resolution
+   - Real-time object detection using contour analysis
+   - Pixel-based size measurement display
+   - Camera properties monitoring (resolution, FPS, codec)
+   - Basic binary thresholding for object isolation
+
+Processing Pipeline:
+   1. Capture video frame from default camera (index 0)
+   2. Convert frame to grayscale for processing
+   3. Apply binary inverse threshold to isolate objects
+   4. Find external contours of detected objects
+   5. Filter contours by minimum area (500 pixels)
+   6. Draw bounding rectangles around valid objects
+   7. Display pixel dimensions for each detected object
+
+Configuration:
+   - Target resolution: 1280x720
+   - Target frame rate: 30 FPS
+   - Minimum contour area: 500 pixels
+   - Binary threshold value: 100 (inverse)
+   - Bounding box color: Green (0, 255, 0)
+   - Display window size: 1280x720 (resized if needed)
+
+Camera Setup:
+   - Uses default camera (VideoCapture index 0)
+   - Attempts to set HD resolution and 30 FPS
+   - Reports actual achieved camera properties
+   - Displays FOURCC codec information
+
+Dependencies:
+   - opencv-python
+
+Controls:
+   - 'q': Quit application
+
+Output:
+   - Real-time video feed with object detection
+   - Green bounding boxes around detected objects
+   - Width and height measurements in pixels
+   - Camera configuration information on startup
+"""
 import cv2
 
 cap = cv2.VideoCapture(0)

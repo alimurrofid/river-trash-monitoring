@@ -1,48 +1,33 @@
 """
-object detection, measurement and counting with distance-based size calibration.
+Real-time object detection and size measurement system using YOLO model
+with camera calibration and distance-based size calculation.
 
 Features:
-   - Streamlined video file processing with YOLO object detection and tracking
+   - YOLO object detection with tracking
    - Distance-based size calibration for accurate measurements
-   - Real-time measurement categorization (meso/makro)  
-   - Automatic video playback with counting line detection
-   - Comprehensive measurement logging
-
-Processing Mode:
-   - Single video playthrough at normal speed (33ms frame delay)
-   - Automatic termination when video ends
-   - Simplified interface with minimal controls
+   - Camera distortion correction using calibration parameters
+   - Object counting with size categorization (meso/makro)
+   - Real-time measurement logging and display
 
 Size Categories:
    - Meso: 0.5-2.5 cm objects
    - Makro: 2.5-100 cm objects
-
-Configuration:
-   - Reference: 20cm object at 200cm distance = 40px
-   - Working distance: 300cm (calibrated for video perspective)
-   - No camera distortion correction
-
-Input:
-   - Video file: datasets/actioncam/test.mp4
-   - Single complete analysis pass
-
-Model:
-   - YOLO model: runs/dataset_clean_flip_retrain/y11n_batch16_epochs100/weights/best.pt
-
-Dependencies:
-   - ultralytics (YOLO)
-   - opencv-python
+   
+Calibration Setup:
+   - Reference: 20cm object at 100cm distance = 79px
+   - Working distance: 100cm (adjustable)
+   - Camera intrinsics loaded from camera_intrinsics.txt
 
 Controls:
-   - 'q': Quit before video completion
+   - Press 'q' to quit and show final counting results
 
 Output:
-   - Video display with detection overlays and real-time counting
-   - Final comprehensive report with complete analysis results
-   - Detailed measurement log with size categorization
-   - Performance metrics and calibration information
+   - Real-time object detection with size measurements
+   - Counting statistics by category
+   - Measurement log with detailed size data
 """
 import cv2
+import numpy as np
 import time
 from ultralytics import YOLO
 import sys
@@ -50,9 +35,9 @@ import os
 
 # ====== KALIBRASI UKURAN DENGAN JARAK ======
 ukuran_objek_cm = 20               # Ukuran real objek kalibrasi (cm)
-ukuran_objek_px = 40               # Ukuran objek di kamera saat kalibrasi (pixel)
-jarak_kalibrasi_cm = 200           # Jarak kamera ke objek saat kalibrasi (cm)
-jarak_kerja_cm = 300             # Jarak kamera saat penggunaan (cm) - bisa diubah
+ukuran_objek_px = 79               # Ukuran objek di kamera saat kalibrasi (pixel)
+jarak_kalibrasi_cm = 100           # Jarak kamera ke objek saat kalibrasi (cm)
+jarak_kerja_cm = 100             # Jarak kamera saat penggunaan (cm) - bisa diubah
 
 # Hitung konstanta kalibrasi
 k = ukuran_objek_cm / (ukuran_objek_px * jarak_kalibrasi_cm)
@@ -67,43 +52,83 @@ print(f"Konstanta k: {k:.8f}")
 print(f"cm_per_pixel saat ini: {cm_per_pixel:.5f}")
 print()
 
-def setup_video_capture(video_path):
-    """Setup video capture with error handling"""
-    print(f"📹 Setting up video capture from: {video_path}")
+def load_camera_intrinsics(file_path):
+    """
+    Membaca parameter intrinsik kamera dari file
+    """
+    if not os.path.exists(file_path):
+        print(f"File {file_path} tidak ditemukan!")
+        return None, None
     
-    # Check if file exists
-    if not os.path.exists(video_path):
-        print(f"❌ Video file not found: {video_path}")
-        return None
+    camera_matrix = np.zeros((3, 3))
+    dist_coeffs = np.zeros((5,))
     
-    cap = cv2.VideoCapture(video_path)
+    try:
+        with open(file_path, 'r') as f:
+            lines = f.readlines()
+            
+        for line in lines:
+            line = line.strip()
+            if line.startswith('fx:'):
+                camera_matrix[0, 0] = float(line.split(':')[1])
+            elif line.startswith('fy:'):
+                camera_matrix[1, 1] = float(line.split(':')[1])
+            elif line.startswith('px:'):
+                camera_matrix[0, 2] = float(line.split(':')[1])
+            elif line.startswith('py:'):
+                camera_matrix[1, 2] = float(line.split(':')[1])
+            elif line.startswith('dist:'):
+                dist_values = line.split(':')[1].split(',')
+                for i, val in enumerate(dist_values):
+                    if i < 5:  # Maksimal 5 koefisien distorsi
+                        dist_coeffs[i] = float(val)
+        
+        camera_matrix[2, 2] = 1.0  # Set elemen (2,2) = 1
+        
+        print("=== PARAMETER KAMERA BERHASIL DIMUAT ===")
+        print(f"fx: {camera_matrix[0, 0]:.2f}")
+        print(f"fy: {camera_matrix[1, 1]:.2f}")
+        print(f"px: {camera_matrix[0, 2]:.2f}")
+        print(f"py: {camera_matrix[1, 2]:.2f}")
+        print(f"Distorsi: {dist_coeffs}")
+        print()
+        
+        return camera_matrix, dist_coeffs
+        
+    except Exception as e:
+        print(f"Error membaca file kalibrasi: {e}")
+        return None, None
+
+def setup_camera_capture(camera_index=0):
+    """Setup camera capture with error handling"""
+    print(f"📹 Setting up camera capture from camera index: {camera_index}")
+    
+    cap = cv2.VideoCapture(camera_index)
     
     if not cap.isOpened():
-        print("❌ Failed to open video file!")
+        print(f"❌ Failed to open camera {camera_index}!")
         return None
     
-    # Get video properties
+    # Set camera properties for better performance
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    
+    # Get actual camera properties
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = frame_count / fps if fps > 0 else 0
     
-    print(f"✅ Video setup successful!")
+    print(f"✅ Camera setup successful!")
     print(f"Resolution: {width}x{height}")
     print(f"FPS: {fps}")
-    print(f"Total frames: {frame_count}")
-    print(f"Duration: {duration:.2f} seconds")
     
     # Test frame reading
     ret, frame = cap.read()
     if not ret or frame is None:
-        print("❌ Cannot read frames from video!")
+        print("❌ Cannot read frames from camera!")
         cap.release()
         return None
-    
-    # Reset to beginning
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
     print(f"✅ Frame reading test successful!")
     return cap
@@ -172,30 +197,56 @@ def get_accurate_measurement(frame, yolo_bbox):
     return x1, y1, x2, y2, x2-x1, y2-y1
 
 # ====== MAIN PROGRAM START ======
-print("🚀 Starting Object Counting Program with Video Input...")
+print("🚀 Starting Object Counting Program with Camera Calibration...")
 
-# Setup video path
-video_path = "datasets/actioncam/test.mp4"
+# Load parameter kalibrasi kamera
+print("🔧 Loading camera calibration...")
+intrinsics_file = "camera_intrinsics.txt"  # Sesuaikan path file
+camera_matrix, dist_coeffs = load_camera_intrinsics(intrinsics_file)
 
-# Setup video capture
-cap = setup_video_capture(video_path)
+if camera_matrix is None:
+    print("⚠️  Menggunakan kamera tanpa kalibrasi kamera...")
+    use_calibration = False
+else:
+    use_calibration = True
+    print("✅ Kalibrasi kamera berhasil dimuat!")
+
+# Setup camera capture
+cap = setup_camera_capture(0)  # 0 for default camera, change if needed
 if cap is None:
-    print("❌ Video setup failed!")
+    print("❌ Camera setup failed!")
     print("\nPossible solutions:")
-    print("1. Check if video file exists")
-    print("2. Check video file format (MP4, AVI, MOV supported)")
-    print("3. Check file permissions")
-    print("4. Try different video codec")
+    print("1. Check if camera is connected")
+    print("2. Check camera permissions")
+    print("3. Try different camera index (1, 2, etc.)")
+    print("4. Check if camera is being used by another application")
     sys.exit()
 
 frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-video_fps = cap.get(cv2.CAP_PROP_FPS)
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+camera_fps = cap.get(cv2.CAP_PROP_FPS)
+
+# Setup undistortion map jika menggunakan kalibrasi
+if use_calibration:
+    print("🔧 Creating undistortion maps...")
+    new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+        camera_matrix, dist_coeffs, (frame_width, frame_height), 1, (frame_width, frame_height))
+    map1, map2 = cv2.initUndistortRectifyMap(
+        camera_matrix, dist_coeffs, None, new_camera_matrix, (frame_width, frame_height), cv2.CV_16SC2)
+    x_roi, y_roi, w_roi, h_roi = roi  # koordinat ROI untuk cropping
+    print("✅ Undistortion maps created successfully!")
+    print(f"ROI after undistortion: {x_roi},{y_roi} size {w_roi}x{h_roi}")
+    
+    # Update frame dimensions setelah undistortion
+    effective_width = w_roi
+    effective_height = h_roi
+else:
+    effective_width = frame_width
+    effective_height = frame_height
 
 # Resize tampilan
-display_width = min(1280, frame_width)
-display_height = min(720, frame_height)
+display_width = min(1280, effective_width)
+display_height = min(720, effective_height)
 
 print(f"Display size: {display_width}x{display_height}")
 
@@ -217,9 +268,10 @@ COLOR_FPS = (0, 255, 255)
 COLOR_LINE = (0, 0, 255)      # MERAH untuk garis counting
 COLOR_TEXT = (255, 0, 0)
 COLOR_DISTANCE = (255, 255, 0) # Cyan
+COLOR_CALIBRATION = (255, 0, 255) # Magenta untuk info kalibrasi
 
 # ====== TRACKING & COUNTING ======
-line_y = int(frame_height * 0.7)
+line_y = int(effective_height * 0.7)
 object_counter = {}
 track_history = {}
 counted_objects = set()
@@ -230,32 +282,31 @@ fps_list = []
 batch_interval = 2
 frame_count = 0
 last_results = None
-current_frame_idx = 0
 
-# Video playback control (removed all variables)
-# Debug info
-show_debug = True
+# Measurement log
 measurement_log = []
-distance_calibration_mode = False
 
 print("✅ Program ready!")
 print("\nControls:")
 print("- 'q': Quit")
-print("\nPress any key in the video window to start...")
+print("\nPress any key in the camera window to start...")
 
 # Create window
-cv2.namedWindow("Distance-Calibrated Object Counting - Video", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("Distance-Calibrated Object Counting - Video", display_width, display_height)
+cv2.namedWindow("Distance-Calibrated Object Counting with Camera Calibration", cv2.WINDOW_NORMAL)
+cv2.resizeWindow("Distance-Calibrated Object Counting with Camera Calibration", display_width, display_height)
 
 # ====== MAIN LOOP ======
 try:
-    while cap.isOpened():
+    while True:
         ret, frame = cap.read()
         if not ret:
-            print("📹 End of video reached!")
+            print("❌ Failed to read from camera!")
             break
 
-        current_frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        # Terapkan koreksi distorsi jika tersedia
+        if use_calibration:
+            frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+            frame = frame[y_roi:y_roi+h_roi, x_roi:x_roi+w_roi]  # Crop bagian hitam
 
         frame_count += 1
         curr_time = time.time()
@@ -276,8 +327,8 @@ try:
         else:
             results = last_results
 
-        # Draw counting line (invisible)
-        cv2.line(frame, (0, line_y), (frame_width, line_y), COLOR_LINE, 2)
+        # Draw counting line
+        cv2.line(frame, (0, line_y), (effective_width, line_y), COLOR_LINE, 2)
 
         # Process detections
         if results and len(results) > 0 and results[0].boxes is not None:
@@ -332,18 +383,7 @@ try:
                         track_history[track_id] = center_y
 
                     # Draw bounding boxes
-                    if show_debug:
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_YOLO, 1)
-                        cv2.putText(frame, "YOLO", (x1, y1-30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COLOR_YOLO, 1)
-                    
                     cv2.rectangle(frame, (acc_x1, acc_y1), (acc_x2, acc_y2), color, 2)
-                    
-                    if show_debug:
-                        yolo_w, yolo_h = x2-x1, y2-y1
-                        yolo_w_cm, yolo_h_cm = yolo_w * cm_per_pixel, yolo_h * cm_per_pixel
-                        label_debug = f"YOLO: {yolo_w_cm:.1f}x{yolo_h_cm:.1f}cm | Accurate: {width_cm:.1f}x{height_cm:.1f}cm"
-                        cv2.putText(frame, label_debug, (acc_x1, acc_y1 - 35), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
                     
                     label = f"{class_name}({track_id}) {confidence*100:.0f}% | {width_cm:.1f}x{height_cm:.1f}cm [{kategori}]"
                     cv2.putText(frame, label, (acc_x1, acc_y1 - 10), 
@@ -353,7 +393,7 @@ try:
                     print(f"Error processing detection: {e}")
                     continue
 
-        # Display FPS and distance info
+        # Display FPS and info
         cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_FPS, 2)
         
@@ -361,14 +401,13 @@ try:
         cv2.putText(frame, distance_info, (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_DISTANCE, 2)
         
-        if distance_calibration_mode:
-            cv2.putText(frame, "DISTANCE CALIBRATION MODE", (10, 90),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            cv2.putText(frame, "Use +/- to adjust distance, 'c' to exit", (10, 120),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        # Camera calibration status
+        calib_status = "Camera: CALIBRATED" if use_calibration else "Camera: NO CALIBRATION"
+        cv2.putText(frame, calib_status, (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_CALIBRATION, 2)
 
         # Show counting results
-        y_offset = 150 if distance_calibration_mode else 120
+        y_offset = 120
         cv2.putText(frame, "=== COUNTING RESULTS ===", (10, y_offset), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXT, 2)
         
@@ -381,13 +420,12 @@ try:
         # Display frame
         try:
             display_frame = cv2.resize(frame, (display_width, display_height))
-            cv2.imshow("Distance-Calibrated Object Counting - Video", display_frame)
+            cv2.imshow("Distance-Calibrated Object Counting with Camera Calibration", display_frame)
         except Exception as e:
             print(f"Display error: {e}")
 
-        # Handle keys - only quit function
-        wait_time = 33  # Normal video playback speed
-        key = cv2.waitKey(wait_time) & 0xFF
+        # Handle keys
+        key = cv2.waitKey(1) & 0xFF
         
         if key == ord("q"):
             break
@@ -431,5 +469,5 @@ finally:
     print(f"  - Konstanta k: {k:.8f}")
     print(f"  - Jarak kerja: {jarak_kerja_cm} cm")
     print(f"  - cm_per_pixel: {cm_per_pixel:.5f}")
-    print("Metode: YOLO Detection + Contour Refinement + Distance Calibration")
-    print(f"Video source: {video_path}")
+    print(f"  - Kalibrasi kamera: {'AKTIF' if use_calibration else 'TIDAK AKTIF'}")
+    print("Metode: YOLO Detection + Contour Refinement + Distance Calibration + Camera Calibration")

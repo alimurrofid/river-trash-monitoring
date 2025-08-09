@@ -1,3 +1,59 @@
+"""
+Camera calibration-aware object detection system with optional distortion correction
+for accurate real-time object measurement and analysis.
+
+Features:
+   - Camera intrinsic parameter loading from configuration file
+   - Optional lens distortion correction using calibration data
+   - Real-time object detection with contour analysis
+   - Automatic ROI handling after undistortion
+   - Graceful fallback to uncalibrated mode
+
+Calibration System:
+   - Reads camera matrix (fx, fy, px, py) from camera_intrinsics.txt
+   - Loads distortion coefficients for lens correction
+   - Generates optimal camera matrix and undistortion maps
+   - Applies real-time distortion correction with ROI cropping
+   - Maintains full functionality without calibration file
+
+Processing Pipeline:
+   1. Load camera intrinsic parameters (optional)
+   2. Initialize camera with HD resolution and frame rate
+   3. Generate undistortion maps if calibration available
+   4. For each frame:
+      - Apply lens distortion correction (if calibrated)
+      - Crop to valid region of interest
+      - Convert to grayscale and apply binary threshold
+      - Find and filter contours by minimum area
+      - Draw bounding boxes and pixel measurements
+
+Configuration:
+   - Camera resolution: 1280x720 @ 30fps
+   - Minimum contour area: 500 pixels
+   - Binary threshold: 100 (inverse threshold)
+   - Display resolution: 1280x720 (resized to fit)
+   - Detection color: Green (0, 255, 0)
+
+File Format (camera_intrinsics.txt):
+   fx: [focal_length_x]
+   fy: [focal_length_y]
+   px: [principal_point_x]
+   py: [principal_point_y]
+   dist: [k1,k2,p1,p2,k3]
+
+Dependencies:
+   - opencv-python
+   - numpy
+
+Controls:
+   - 'q': Quit application
+
+Output:
+   - Real-time video with optional distortion correction
+   - Green bounding boxes around detected objects
+   - Pixel dimensions displayed for each object
+   - Calibration status and camera properties on startup
+"""
 import cv2
 import numpy as np
 import os
