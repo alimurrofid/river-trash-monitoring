@@ -642,8 +642,8 @@ print("- 'q': Quit")
 print("\nPress any key in the video window to start...")
 
 # Create window
-cv2.namedWindow("Distance-Calibrated Object Counting with Camera Calibration", cv2.WINDOW_NORMAL)
-cv2.resizeWindow("Distance-Calibrated Object Counting with Camera Calibration", display_width, display_height)
+#cv2.namedWindow("Distance-Calibrated Object Counting with Camera Calibration", cv2.WINDOW_NORMAL)
+#cv2.resizeWindow("Distance-Calibrated Object Counting with Camera Calibration", display_width, display_height)
 
 # ====== MAIN LOOP ======
 try:
@@ -785,18 +785,20 @@ try:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT, 2)
 
         # Stream the original frame (without overlays) to RTMP
-        if streaming_enabled and original_frame_for_streaming is not None:
-            stream_frame(original_frame_for_streaming)
+        #if streaming_enabled and original_frame_for_streaming is not None:
+        #    stream_frame(original_frame_for_streaming)
+
+        stream_frame(frame)
 
         # Publish MQTT data periodically
         publish_mqtt_data(object_counter)
 
         # Display frame
-        try:
-            display_frame = cv2.resize(frame, (display_width, display_height))
-            cv2.imshow("Distance-Calibrated Object Counting with Camera Calibration", display_frame)
-        except Exception as e:
-            print(f"Display error: {e}")
+        #try:
+        #    display_frame = cv2.resize(frame, (display_width, display_height))
+        #    cv2.imshow("Distance-Calibrated Object Counting with Camera Calibration", display_frame)
+        #except Exception as e:
+        #    print(f"Display error: {e}")
 
         # Handle keys
         wait_time = 33  # Normal video playback speed
