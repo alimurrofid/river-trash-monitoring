@@ -462,9 +462,12 @@ def setup_video_capture(video_path):
         print("❌ Cannot read frames from video!")
         cap.release()
         return None
-    
-    # Reset to beginning
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+    # Reset to beginning only for video input
+    if not (video_path.endswith('.m3u8') or video_path.startswith('rtmp://') 
+        or video_path.startswith('http://') or video_path.startswith('https://')):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # only for files
+
     
     print(f"✅ Frame reading test successful!")
 
@@ -671,11 +674,13 @@ try:
 
         # update for video looping
         if not ret or frame is None:
-            time.sleep(0.5)
             if now - last_ok_time > STALL_SEC:
-                cap.release()
-                time.sleep(0.5)
+                cap.release(); time.sleep(0.3)
                 cap = setup_video_capture(video_path)
+                last_ok_time = time.time()
+                last_hash = None
+                same_hash_count = 0
+            time.sleep(0.05)
             # print("📹 End of video reached!")
             continue
 
