@@ -59,6 +59,7 @@ import json
 import paho.mqtt.client as mqtt
 import subprocess
 from dotenv import load_dotenv
+import hashlib
 
 # Load environment variables
 load_dotenv()
@@ -418,6 +419,10 @@ def load_camera_intrinsics(file_path):
         print(f"Error membaca file kalibrasi: {e}")
         return None, None
 
+# Handling Continuous Video Streams Loops
+def frame_hash(frame):
+    return hashlib.md5(frame[::16, ::16].tobytes()).hexdigest()
+
 def setup_video_capture(video_path):
     """Setup video capture with error handling"""
     print(f"📹 Setting up video capture from: {video_path}")
@@ -430,8 +435,10 @@ def setup_video_capture(video_path):
         print(f"❌ Video file not found: {video_path}")
         return None
     
-    cap = cv2.VideoCapture(video_path)
-    
+    BACKEND = cv2.CAP_FFMPEG if video_path.endswith('.m3u8') else cv2.CAP_ANY
+
+    cap = cv2.VideoCapture(video_path, apiPreference=BACKEND)
+
     if not cap.isOpened():
         print("❌ Failed to open video file!")
         return None
@@ -460,6 +467,10 @@ def setup_video_capture(video_path):
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
     print(f"✅ Frame reading test successful!")
+
+    # Set buffer size for video capture for video looping purposes
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+
     return cap
 
 def update_distance_calibration(new_distance_cm):
@@ -646,12 +657,44 @@ print("\nPress any key in the video window to start...")
 #cv2.resizeWindow("Distance-Calibrated Object Counting with Camera Calibration", display_width, display_height)
 
 # ====== MAIN LOOP ======
+
+# For video looping purposes
+last_ok_time = time.time()
+last_hash = None
+STALL_SEC = 5          # restart if no progress for N seconds
+SAME_HASH_LIMIT = 100  # restart if we saw N identical frames (edge case)
+
 try:
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret:
-            print("📹 End of video reached!")
-            break
+        now = time.time()
+
+        # update for video looping
+        if not ret or frame is None:
+            time.sleep(0.5)
+            if now - last_ok_time > STALL_SEC:
+                cap.release()
+                time.sleep(0.5)
+                cap = setup_video_capture(video_path)
+            # print("📹 End of video reached!")
+            continue
+
+        h = frame_hash(frame)
+        if h == last_hash:
+            same_hash_count += 1
+        else:
+            same_hash_count = 0
+            last_hash = h
+            last_ok_time = now
+
+        if same_hash_count > SAME_HASH_LIMIT or (now - last_ok_time > STALL_SEC):
+            # considered stuck → reopen
+            cap.release()
+            time.sleep(0.5)
+            cap = setup_video_capture(video_path)
+            last_ok_time = time.time()
+            same_hash_count = 0
+            continue
 
         current_frame_idx = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
 
