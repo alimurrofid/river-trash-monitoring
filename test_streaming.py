@@ -35,6 +35,8 @@ print()
 mqtt_broker = os.getenv('MQTT_BROKER', '127.0.0.1')
 mqtt_port = int(os.getenv('MQTT_PORT', '1883'))
 mqtt_topic = os.getenv('MQTT_TOPIC', 'waste/detections')
+mqtt_username = os.getenv('MQTT_USERNAME', None)
+mqtt_password = os.getenv('MQTT_PASSWORD', None)
 mqtt_client = None
 mqtt_connected = False
 last_mqtt_publish = 0
@@ -85,37 +87,41 @@ RTMP_URL=rtmp://192.168.137.1:1945/hls/test
         print(f"❌ Error creating .env file: {e}")
 
 def setup_mqtt():
-    """Initialize MQTT client and connection"""
     global mqtt_client, mqtt_connected
     try:
-        mqtt_client = mqtt.Client()
+        mqtt_client = mqtt.Client(transport="websockets")
 
-        # Set up callbacks
+        # Pasang callback
         mqtt_client.on_connect = on_mqtt_connect
         mqtt_client.on_disconnect = on_mqtt_disconnect
         mqtt_client.on_publish = on_mqtt_publish
 
-        # Connect to broker
+        # Set username & password
+        if mqtt_username and mqtt_password:
+            mqtt_client.username_pw_set(mqtt_username, mqtt_password)
+            print(f"🔑 Using MQTT authentication with username '{mqtt_username}'")
+        else:
+            print("⚠️ No MQTT username/password provided, connecting without authentication")
+
+        # TLS wajib kalau di MQTT Explorer tadi encryption ON
+        mqtt_client.tls_set()
+
+        # Connect (host TIDAK pakai ws://)
         print(f"🔗 Connecting to MQTT broker: {mqtt_broker}:{mqtt_port}")
-        
-        # Set timeout for connection attempt
         mqtt_client.connect(mqtt_broker, mqtt_port, 60)
         mqtt_client.loop_start()
         
-        # Wait for connection to establish or fail
-        timeout = 10  # 10 seconds timeout
+        # Tunggu sampai connect
+        timeout = 10
         start_time = time.time()
-        
         while not mqtt_connected and (time.time() - start_time) < timeout:
             time.sleep(0.1)
-        
+
         if not mqtt_connected:
             raise Exception(f"Failed to connect to MQTT broker {mqtt_broker}:{mqtt_port} within {timeout} seconds")
 
     except Exception as e:
         print(f"❌ MQTT Error: {e}")
-        print(f"❌ Cannot connect to MQTT broker at {mqtt_broker}:{mqtt_port}")
-        print("❌ Please ensure MQTT broker is running and accessible")
         if mqtt_client:
             mqtt_client.loop_stop()
         raise SystemExit(f"MQTT Connection Failed: {e}")
